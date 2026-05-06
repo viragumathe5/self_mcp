@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>self_mcp</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="https://cdn.jsdelivr.net/npm/marked@9/marked.min.js"></script>
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+</head>
+<body>
+<div class="app">
+
+  <!-- ══ SIDEBAR ══ -->
+  <nav class="sidebar">
+    <div class="sidebar-logo">
+      <div class="logo-mark"><i data-lucide="layers" style="width:14px;height:14px"></i></div>
+      <div>
+        <div class="logo-text">self_mcp</div>
+        <div class="logo-sub">personal</div>
+      </div>
+    </div>
+    <div class="sidebar-nav">
+      <div class="nav-label">Workspace</div>
+      <button class="nav-item active" id="nav-projects" onclick="goProjects()">
+        <i data-lucide="archive" style="width:14px;height:14px"></i>
+        <span style="flex:1">Projects</span>
+        <span class="nav-badge" id="nav-projects-badge">0</span>
+      </button>
+      <div class="nav-label" style="margin-top:6px">Settings</div>
+      <button class="nav-item" id="nav-setup" onclick="goSetup()">
+        <i data-lucide="cpu" style="width:14px;height:14px"></i>
+        <span style="flex:1">MCP Setup</span>
+      </button>
+    </div>
+    <div class="sidebar-footer">
+      <div>
+        <div class="status-row"><span class="status-dot"></span> MCP active</div>
+        <div class="status-url">localhost:8001/&lt;slug&gt;/sse</div>
+      </div>
+      <button class="theme-toggle" id="theme-toggle-btn" onclick="toggleTheme()" title="Toggle light/dark">
+        <i data-lucide="sun" style="width:14px;height:14px" id="theme-icon"></i>
+      </button>
+    </div>
+  </nav>
+
+  <!-- ══ MAIN ══ -->
+  <div class="main" id="main">
+
+    <!-- View: Projects list -->
+    <div id="view-projects">
+      <div class="topbar">
+        <div class="topbar-left">
+          <h1>Projects</h1>
+          <span class="topbar-meta" id="projects-meta"></span>
+        </div>
+        <button class="btn btn-primary btn-sm" onclick="openCreateProject()">
+          <i data-lucide="plus" style="width:13px;height:13px"></i> New Project
+        </button>
+      </div>
+      <div class="content">
+        <div id="projects-grid" class="projects-grid"></div>
+        <div id="projects-empty" class="empty" style="display:none">
+          <div class="empty-icon"><i data-lucide="archive" style="width:48px;height:48px"></i></div>
+          <div class="empty-title">No projects yet</div>
+          <div class="empty-desc">Create a project to organise your knowledge by topic or context.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- View: Project inside -->
+    <div id="view-project" style="display:none;flex-direction:column;flex:1;overflow:hidden;">
+      <div class="topbar">
+        <div class="topbar-left">
+          <div class="breadcrumb">
+            <button class="bc-link" onclick="goProjects()">
+              <i data-lucide="archive" style="width:12px;height:12px"></i> Projects
+            </button>
+            <span class="bc-sep">/</span>
+            <span class="bc-cur" id="project-breadcrumb-name">—</span>
+          </div>
+        </div>
+        <div id="project-topbar-actions"></div>
+      </div>
+      <div class="project-tabs" id="project-tabs">
+        <button class="project-tab active" id="ptab-docs" onclick="showProjectTab('docs')">
+          <i data-lucide="file-text" style="width:12px;height:12px"></i> Documents
+          <span class="nav-badge" id="ptab-docs-badge">0</span>
+        </button>
+        <button class="project-tab" id="ptab-links" onclick="showProjectTab('links')">
+          <i data-lucide="link-2" style="width:12px;height:12px"></i> Links
+          <span class="nav-badge" id="ptab-links-badge">0</span>
+        </button>
+      </div>
+
+      <!-- Docs sub-view -->
+      <div id="project-view-docs" class="body-split" style="flex:1;overflow:hidden;">
+        <div class="content">
+          <div id="docs-grid" class="docs-grid"></div>
+          <div id="docs-empty" class="empty" style="display:none">
+            <div class="empty-icon"><i data-lucide="file-plus" style="width:48px;height:48px"></i></div>
+            <div class="empty-title">No documents</div>
+            <div class="empty-desc">Add a document to start building this project's knowledge base.</div>
+          </div>
+        </div>
+        <!-- Right panel -->
+        <div class="right-panel">
+          <div class="rp-head"><i data-lucide="bar-chart-2" style="width:11px;height:11px"></i> MCP Summary</div>
+          <div class="rp-body">
+            <div class="rp-stat-grid">
+              <div class="rp-stat"><div class="rp-stat-val" id="rp-docs">0</div><div class="rp-stat-lbl">Documents</div></div>
+              <div class="rp-stat"><div class="rp-stat-val" id="rp-links">0</div><div class="rp-stat-lbl">Links</div></div>
+              <div class="rp-stat"><div class="rp-stat-val" id="rp-tokens">0</div><div class="rp-stat-lbl">Tokens</div></div>
+              <div class="rp-stat"><div class="rp-stat-val" id="rp-avg">—</div><div class="rp-stat-lbl">Avg/doc</div></div>
+            </div>
+            <div class="rp-bar-row"><span>Token budget</span><span id="rp-budget-lbl">0</span></div>
+            <div class="rp-track"><div class="rp-fill" id="rp-fill" style="width:0%"></div></div>
+            <div class="rp-divider"></div>
+            <div class="rp-section-label">Documents</div>
+            <div id="rp-doc-list"></div>
+            <div class="rp-divider"></div>
+            <div class="rp-section-label">MCP Endpoint</div>
+            <div class="rp-url-box"><code id="rp-endpoint">—</code></div>
+            <div style="margin-top:6px;">
+              <button class="btn btn-secondary btn-xs" style="width:100%" onclick="copyProjectSSE()">
+                <i data-lucide="copy" style="width:11px;height:11px"></i> Copy SSE URL
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Links sub-view -->
+      <div id="project-view-links" style="display:none;flex:1;overflow:hidden;">
+        <div class="content">
+          <div id="links-grid" class="links-grid"></div>
+          <div id="links-empty" class="empty" style="display:none">
+            <div class="empty-icon"><i data-lucide="link-2" style="width:48px;height:48px"></i></div>
+            <div class="empty-title">No links saved</div>
+            <div class="empty-desc">Save reference URLs to surface them via this project's MCP endpoint.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- View: MCP Setup -->
+    <div id="view-setup" style="display:none">
+      <div class="topbar"><h1>MCP Setup</h1></div>
+      <div class="content">
+        <div class="setup-wrap">
+
+          <!-- How it works -->
+          <div class="setup-card">
+            <div class="setup-card-title"><i data-lucide="zap" style="width:13px;height:13px"></i> How it works</div>
+            <p style="font-size:13px;color:var(--text2);line-height:1.75;margin-bottom:10px;">
+              Each project gets its own MCP SSE endpoint. Add each project as a separate server entry in your AI client config.
+              Documents are exposed as <strong style="color:var(--text)">tools</strong>, <strong style="color:var(--text)">resources</strong>,
+              and <strong style="color:var(--text)">prompts</strong> — so your AI sees them automatically.
+            </p>
+            <div class="code-block"><pre>http://localhost:8001/<span style="color:var(--accent)">&lt;project_slug&gt;</span>/sse</pre></div>
+          </div>
+
+          <!-- Live projects -->
+          <div class="setup-card">
+            <div class="setup-card-title"><i data-lucide="archive" style="width:13px;height:13px"></i> Your projects</div>
+            <div id="setup-projects-list"><p style="font-size:13px;color:var(--text3)">Loading…</p></div>
+          </div>
+
+          <!-- Config generator -->
+          <div class="setup-card">
+            <div class="setup-card-title"><i data-lucide="clipboard-copy" style="width:13px;height:13px"></i> Config generator</div>
+            <p style="font-size:12px;color:var(--text3);margin-bottom:12px;">Pick your client — copy the full config block and merge it into your config file.</p>
+            <div class="fmt-tabs">
+              <button class="fmt-tab active" id="cfg-btn-opencode" onclick="setConfigFormat('opencode')">OpenCode</button>
+              <button class="fmt-tab" id="cfg-btn-claude" onclick="setConfigFormat('claude')">Claude Desktop</button>
+              <button class="fmt-tab" id="cfg-btn-cursor" onclick="setConfigFormat('cursor')">Cursor</button>
+            </div>
+            <div class="code-block" style="margin-bottom:10px;">
+              <pre id="cfg-output" style="min-height:60px;color:var(--text2)"></pre>
+            </div>
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">
+              <p class="setup-note" id="cfg-note" style="margin:0;flex:1"></p>
+              <button class="btn btn-primary btn-sm" onclick="copyGeneratedConfig()" style="flex-shrink:0">
+                <i data-lucide="copy" style="width:12px;height:12px"></i> Copy
+              </button>
+            </div>
+          </div>
+
+          <!-- Client config locations -->
+          <div class="setup-card">
+            <div class="setup-card-title"><i data-lucide="info" style="width:13px;height:13px"></i> Client config locations</div>
+            <div style="display:flex;flex-direction:column;gap:10px;font-size:12px;color:var(--text2)">
+              <div>
+                <div style="font-weight:600;color:var(--text);margin-bottom:3px;">OpenCode</div>
+                <div class="code-block" style="padding:6px 10px;"><code style="font-family:var(--mono);font-size:11px;color:var(--text3)">~/.config/opencode/opencode.json</code></div>
+              </div>
+              <div>
+                <div style="font-weight:600;color:var(--text);margin-bottom:3px;">Claude Desktop</div>
+                <div class="code-block" style="padding:6px 10px;"><code style="font-family:var(--mono);font-size:11px;color:var(--text3)">~/Library/Application Support/Claude/claude_desktop_config.json</code></div>
+              </div>
+              <div>
+                <div style="font-weight:600;color:var(--text);margin-bottom:3px;">Cursor</div>
+                <div style="color:var(--text3);line-height:1.6;">Settings → MCP → add each project URL as a separate remote server entry.</div>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /main -->
+</div><!-- /app -->
+
+<!-- ══ DOC EDITOR ══ -->
+<div class="doc-page" id="doc-page">
+  <div class="doc-page-topbar">
+    <div class="doc-page-topbar-left">
+      <button class="back-btn" onclick="closePage()">
+        <i data-lucide="arrow-left" style="width:13px;height:13px"></i> Back
+      </button>
+      <input class="doc-title-input" id="page-title" placeholder="Untitled document…" oninput="markDirty()">
+    </div>
+    <div class="doc-page-topbar-right">
+      <span class="dirty-pill" id="dirty-pill" style="display:none">Unsaved</span>
+      <button class="btn btn-danger btn-sm" id="page-del-btn" onclick="deletePage()" style="display:none">
+        <i data-lucide="trash-2" style="width:12px;height:12px"></i> Delete
+      </button>
+      <button class="btn btn-ghost btn-sm" onclick="closePage()">Discard</button>
+      <button class="btn btn-primary btn-sm" onclick="savePage()">
+        <i data-lucide="save" style="width:12px;height:12px"></i> Save
+      </button>
+    </div>
+  </div>
+  <div class="doc-panes">
+    <!-- Metadata -->
+    <div class="doc-pane" style="max-width:220px;min-width:190px;">
+      <div class="pane-bar">
+        <span class="pane-label"><i data-lucide="info" style="width:10px;height:10px"></i> Metadata</span>
+      </div>
+      <div class="pane-scroll">
+        <div class="meta-pane-content">
+          <input type="hidden" id="page-id">
+          <div class="meta-field">
+            <label>Tags</label>
+            <input class="meta-input" id="page-tags" placeholder="api, setup, notes" oninput="renderTags()">
+            <div class="tags-preview" id="tags-preview"></div>
+          </div>
+          <div class="meta-field">
+            <label>Token usage</label>
+            <div class="token-meter">
+              <div class="token-row"><span>Characters</span><strong id="char-count">0</strong></div>
+              <div class="token-row"><span>Tokens (est.)</span><strong id="token-count">0</strong></div>
+              <div class="token-row"><span>Limit</span><strong style="color:var(--text3)">2,000</strong></div>
+              <div class="token-bar-track">
+                <div class="token-bar-fill" id="token-bar" style="width:0%;background:var(--green)"></div>
+              </div>
+            </div>
+          </div>
+          <div class="meta-field" id="page-dates" style="display:none">
+            <label>Dates</label>
+            <div class="meta-dates">
+              <div>Created <span id="page-created">—</span></div>
+              <div>Updated <span id="page-updated">—</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <!-- Editor -->
+    <div class="doc-pane">
+      <div class="pane-bar">
+        <span class="pane-label"><i data-lucide="pencil" style="width:10px;height:10px"></i> Markdown</span>
+        <span style="font-size:10px;color:var(--text3)">⌘S to save</span>
+      </div>
+      <textarea id="editor" oninput="onEditorInput()" placeholder="Write in Markdown…"></textarea>
+    </div>
+    <!-- Preview -->
+    <div class="doc-pane">
+      <div class="pane-bar">
+        <span class="pane-label"><i data-lucide="eye" style="width:10px;height:10px"></i> Preview</span>
+      </div>
+      <div class="pane-scroll">
+        <div class="md-preview" id="md-preview"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══ MODALS ══ -->
+<div class="overlay" id="project-modal">
+  <div class="modal">
+    <div class="modal-head">
+      <h2 id="project-modal-title">New Project</h2>
+      <button class="modal-close" onclick="closeProjectModal()"><i data-lucide="x" style="width:13px;height:13px"></i></button>
+    </div>
+    <div class="modal-body">
+      <input type="hidden" id="pm-id">
+      <div class="form-field"><label>Name</label><input class="form-input" id="pm-name" placeholder="e.g. Work, Personal, Research"></div>
+      <div class="form-field"><label>Description (optional)</label><input class="form-input" id="pm-desc" placeholder="What is this project for?"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-secondary btn-sm" onclick="closeProjectModal()">Cancel</button>
+      <button class="btn btn-primary btn-sm" onclick="saveProject()"><i data-lucide="save" style="width:12px;height:12px"></i> Save</button>
+    </div>
+  </div>
+</div>
+
+<div class="overlay" id="link-modal">
+  <div class="modal">
+    <div class="modal-head">
+      <h2>Save Link</h2>
+      <button class="modal-close" onclick="closeLinkModal()"><i data-lucide="x" style="width:13px;height:13px"></i></button>
+    </div>
+    <div class="modal-body">
+      <div class="form-field"><label>Title</label><input class="form-input" id="lm-title" placeholder="MCP SDK Docs"></div>
+      <div class="form-field"><label>URL</label><input class="form-input" type="url" id="lm-url" placeholder="https://…"></div>
+      <div class="form-field"><label>Description (optional)</label><input class="form-input" id="lm-desc" placeholder="Short description"></div>
+      <div class="form-field"><label>Tags (comma-separated)</label><input class="form-input" id="lm-tags" placeholder="docs, reference"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-secondary btn-sm" onclick="closeLinkModal()">Cancel</button>
+      <button class="btn btn-primary btn-sm" onclick="saveLink()"><i data-lucide="save" style="width:12px;height:12px"></i> Save</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

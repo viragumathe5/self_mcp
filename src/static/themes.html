@@ -1,0 +1,515 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Theme Picker — self_mcp</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=Inter:wght@400;500;600;700;800&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: #0e0e0f;
+  color: #d8d4cc;
+  font-family: 'DM Sans', sans-serif;
+  font-size: 14px;
+  min-height: 100vh;
+}
+
+.picker-header {
+  padding: 26px 32px 18px;
+  border-bottom: 1px solid #1e1e1e;
+}
+.picker-header h1 { font-size: 18px; font-weight: 700; margin-bottom: 3px; color: #eae8e4; }
+.picker-header p  { font-size: 13px; color: #666; }
+
+.controls {
+  display: flex; flex-wrap: wrap; gap: 20px;
+  padding: 14px 32px;
+  border-bottom: 1px solid #181818;
+  background: #0a0a0b;
+  position: sticky; top: 0; z-index: 100;
+}
+.ctrl-group { display: flex; flex-direction: column; gap: 6px; }
+.ctrl-label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .1em; color: #555; }
+.ctrl-pills { display: flex; gap: 5px; flex-wrap: wrap; }
+
+.pill {
+  padding: 5px 13px; border-radius: 6px;
+  font-size: 12px; font-weight: 500; cursor: pointer;
+  border: 1px solid #2a2a2a; background: #141414; color: #888;
+  transition: all .15s; font-family: 'DM Sans', sans-serif;
+}
+.pill:hover { border-color: #444; color: #bbb; }
+.pill.active { background: #c07840; color: #fff; border-color: #c07840; font-weight: 600; }
+.pill.light-pill.active { background: #1a1a1a; color: #fff; border-color: #444; }
+
+.section-divider {
+  padding: 14px 32px 0;
+  font-size: 10px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .1em; color: #444;
+  border-top: 1px solid #1a1a1a;
+  margin-top: 4px;
+}
+
+.preview-wrap { padding: 20px 32px 40px; }
+.preview-label {
+  font-size: 11px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: .08em; color: #555; margin-bottom: 10px;
+}
+
+.preview-frame {
+  border-radius: 10px; overflow: hidden;
+  border: 1px solid #222;
+  height: 540px;
+  display: flex;
+}
+
+/* ═══════════════════════════════
+   DARK THEMES
+═══════════════════════════════ */
+.theme-graphite {
+  --bg:#111111; --bg2:#1a1a1a; --bg3:#222222;
+  --border:#2c2c2c; --border2:#3c3c3c;
+  --text:#e8e4de; --text2:#a0988e; --text3:#666058;
+  --accent:#c07840; --accent-dim:#281808;
+  --green:#789068; --green-dim:#141e10;
+  --red:#b86060; --red-dim:#281212;
+  --amber:#c09040; --amber-dim:#281c08;
+}
+.theme-slate {
+  --bg:#0d1117; --bg2:#161c24; --bg3:#1d2530;
+  --border:#252e3d; --border2:#31405a;
+  --text:#f0ebe0; --text2:#a8b0c4; --text3:#5a6480;
+  --accent:#7b96e8; --accent-dim:#1a2244;
+  --green:#5aab7e; --green-dim:#0e2a1c;
+  --red:#c46060; --red-dim:#2a1212;
+  --amber:#c4a050; --amber-dim:#2a1e08;
+}
+.theme-obsidian {
+  --bg:#111010; --bg2:#1a1918; --bg3:#222120;
+  --border:#2e2c2a; --border2:#423e3a;
+  --text:#ede8e0; --text2:#a89f92; --text3:#6a6058;
+  --accent:#c4a03a; --accent-dim:#2a200a;
+  --green:#6a9e6a; --green-dim:#122012;
+  --red:#b86060; --red-dim:#281212;
+  --amber:#c4803a; --amber-dim:#2a1808;
+}
+.theme-midnight {
+  --bg:#0c0e14; --bg2:#131720; --bg3:#1a1f2e;
+  --border:#222840; --border2:#2e3658;
+  --text:#ecddb8; --text2:#a09278; --text3:#605840;
+  --accent:#c4a96b; --accent-dim:#221c08;
+  --green:#6a9870; --green-dim:#101e14;
+  --red:#b86868; --red-dim:#281212;
+  --amber:#c49050; --amber-dim:#281c08;
+}
+
+/* ═══════════════════════════════
+   LIGHT THEMES
+═══════════════════════════════ */
+
+/* 1 · Paper White — Perplexity-inspired: pure white, crisp, teal accent */
+.theme-paper {
+  --bg:#ffffff; --bg2:#f7f7f8; --bg3:#eeeeef;
+  --border:#e4e4e6; --border2:#d0d0d3;
+  --text:#111111; --text2:#555558; --text3:#9999a0;
+  --accent:#0f7d7d; --accent-dim:#e0f2f2;
+  --green:#2a8a50; --green-dim:#e6f5ec;
+  --red:#c04040; --red-dim:#fce8e8;
+  --amber:#b06020; --amber-dim:#fdf2e0;
+}
+
+/* 2 · Warm Canvas — off-white, warm stone sidebar, burnt sienna accent */
+.theme-canvas {
+  --bg:#faf8f5; --bg2:#f2ede8; --bg3:#e8e2da;
+  --border:#ddd6cc; --border2:#ccc4b8;
+  --text:#1a1714; --text2:#6a6058; --text3:#aaa098;
+  --accent:#b05a28; --accent-dim:#faeee6;
+  --green:#3a7a50; --green-dim:#e8f5ee;
+  --red:#b84040; --red-dim:#fde8e8;
+  --amber:#a86820; --amber-dim:#fdf0e0;
+}
+
+/* 3 · Cloud — very light blue-grey, indigo accent, like Linear/Notion */
+.theme-cloud {
+  --bg:#f8f9fc; --bg2:#f0f2f7; --bg3:#e6e9f2;
+  --border:#dde1ee; --border2:#c8cedf;
+  --text:#0e1120; --text2:#5a6080; --text3:#9098b8;
+  --accent:#4a60c8; --accent-dim:#eaedfa;
+  --green:#2a8858; --green-dim:#e6f5ee;
+  --red:#b84848; --red-dim:#fce8e8;
+  --amber:#a87020; --amber-dim:#fdf2e0;
+}
+
+/* 4 · Parchment — aged paper, ink text, olive accent. editorial. */
+.theme-parchment {
+  --bg:#f5f0e8; --bg2:#ede6d8; --bg3:#e4dace;
+  --border:#d8d0c0; --border2:#c8bca8;
+  --text:#1e1a14; --text2:#6a6050; --text3:#a8a090;
+  --accent:#6a7828; --accent-dim:#eef2e0;
+  --green:#3a7840; --green-dim:#e8f4ea;
+  --red:#b84848; --red-dim:#fde8e8;
+  --amber:#a87820; --amber-dim:#fdf4e0;
+}
+
+/* font classes */
+.font-dmsans  { font-family: 'DM Sans', sans-serif; }
+.font-inter   { font-family: 'Inter', sans-serif; }
+.font-geist   { font-family: 'Inter', sans-serif; letter-spacing: -.012em; }
+.font-outfit  { font-family: 'Outfit', sans-serif; }
+
+/* ═══════════════════════════════
+   SIMULATED APP UI
+═══════════════════════════════ */
+.sim {
+  display: flex; width: 100%; height: 100%;
+  background: var(--bg); color: var(--text);
+  font-size: 13px; line-height: 1.6;
+  transition: background .25s, color .25s;
+}
+.sim * { box-sizing: border-box; }
+
+.sim-sidebar {
+  width: 200px; min-width: 200px;
+  background: var(--bg2); border-right: 1px solid var(--border);
+  display: flex; flex-direction: column;
+}
+.sim-logo {
+  padding: 13px 12px;
+  border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: 9px;
+}
+.sim-logo-mark {
+  width: 26px; height: 26px; border-radius: 6px;
+  background: var(--accent-dim); border: 1px solid var(--border2);
+  display: flex; align-items: center; justify-content: center;
+  color: var(--accent); flex-shrink: 0;
+}
+.sim-logo-text { font-size: 13px; font-weight: 700; color: var(--text); }
+.sim-logo-sub  { font-size: 10px; color: var(--text3); font-family: monospace; }
+.sim-nav { flex: 1; padding: 8px 6px; }
+.sim-nav-label { padding: 8px 8px 3px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .09em; color: var(--text3); }
+.sim-nav-item {
+  display: flex; align-items: center; gap: 7px;
+  padding: 6px 9px; border-radius: 5px; margin-bottom: 1px;
+  color: var(--text2); font-size: 12px; font-weight: 500;
+}
+.sim-nav-item.active { background: var(--accent-dim); color: var(--accent); font-weight: 600; }
+.sim-nav-badge {
+  margin-left: auto; font-size: 10px; color: var(--text3);
+  background: var(--bg3); border: 1px solid var(--border2);
+  border-radius: 99px; padding: 0 5px; font-family: monospace;
+}
+.sim-footer {
+  padding: 10px 12px; border-top: 1px solid var(--border);
+  font-size: 11px; color: var(--green);
+  display: flex; align-items: center; gap: 5px;
+}
+.sim-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--green); animation: pulse 2.5s infinite; }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
+
+.sim-main { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; background: var(--bg); }
+.sim-topbar {
+  height: 46px; padding: 0 18px;
+  background: var(--bg2); border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: space-between; flex-shrink: 0;
+}
+.sim-topbar h1 { font-size: 14px; font-weight: 700; color: var(--text); }
+.sim-btn {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 5px 12px; border-radius: 5px;
+  font-size: 11px; font-weight: 600;
+  background: var(--accent); color: #fff;
+  border: none; cursor: default; letter-spacing: .01em;
+}
+/* keep button text white on light accents too */
+.theme-paper .sim-btn,
+.theme-canvas .sim-btn,
+.theme-parchment .sim-btn { color: #fff; }
+.theme-cloud .sim-btn { color: #fff; }
+
+.sim-content { flex: 1; overflow: hidden; padding: 14px 16px; display: flex; gap: 10px; }
+.sim-cards-col { flex: 1; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+
+.sim-card {
+  background: var(--bg2); border: 1px solid var(--border);
+  border-radius: 8px; padding: 13px 14px;
+  display: flex; flex-direction: column; gap: 7px;
+  transition: border-color .15s;
+}
+.sim-card-header { display: flex; align-items: center; gap: 9px; }
+.sim-card-icon {
+  width: 28px; height: 28px; border-radius: 5px;
+  background: var(--accent-dim); border: 1px solid var(--border2);
+  display: flex; align-items: center; justify-content: center;
+  color: var(--accent); flex-shrink: 0;
+}
+.sim-card-title { font-size: 13px; font-weight: 700; color: var(--text); }
+.sim-card-desc  { font-size: 11px; color: var(--text3); line-height: 1.5; }
+.sim-slug {
+  font-family: monospace; font-size: 10px; color: var(--text3);
+  background: var(--bg3); border: 1px solid var(--border);
+  border-radius: 3px; padding: 1px 5px; display: inline-block;
+}
+.sim-stats { display: flex; gap: 10px; padding-top: 7px; border-top: 1px solid var(--border); }
+.sim-stat { font-size: 11px; color: var(--text3); display: flex; align-items: center; gap: 3px; }
+.sim-stat strong { color: var(--text2); font-weight: 600; }
+.sim-tag {
+  display: inline-flex; align-items: center;
+  background: var(--accent-dim); color: var(--accent);
+  border: 1px solid var(--border2);
+  border-radius: 3px; padding: 1px 6px; font-size: 10px; font-weight: 600;
+}
+.sim-tok-ok { font-family: monospace; font-size: 10px; padding: 1px 5px; border-radius: 3px; background: var(--green-dim); color: var(--green); border: 1px solid var(--border); }
+
+/* empty state */
+.sim-empty {
+  flex: 1; display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  color: var(--text3); text-align: center; gap: 8px;
+  border: 1px dashed var(--border2); border-radius: 8px; padding: 20px;
+}
+.sim-empty-title { font-size: 13px; font-weight: 600; color: var(--text2); }
+.sim-empty-desc  { font-size: 11px; line-height: 1.65; max-width: 180px; }
+
+/* right mini-panel */
+.sim-rp {
+  width: 160px; min-width: 160px;
+  background: var(--bg2); border-left: 1px solid var(--border);
+  display: flex; flex-direction: column;
+}
+.sim-rp-head {
+  padding: 9px 11px; border-bottom: 1px solid var(--border);
+  font-size: 10px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .08em; color: var(--text3);
+}
+.sim-rp-body { padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+.sim-rp-stat { background: var(--bg3); border: 1px solid var(--border); border-radius: 5px; padding: 7px 9px; }
+.sim-rp-val { font-size: 16px; font-weight: 800; color: var(--text); font-family: monospace; }
+.sim-rp-lbl { font-size: 10px; color: var(--text3); }
+
+/* swatch strip */
+.swatch-strip { display: flex; gap: 3px; margin-top: 12px; }
+.swatch { height: 7px; border-radius: 99px; flex: 1; }
+
+/* current selection badge */
+.current-badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: #1e1e1e; border: 1px solid #333;
+  border-radius: 6px; padding: 6px 12px; margin-bottom: 12px;
+  font-size: 12px; color: #aaa;
+}
+.current-badge strong { color: #eee; }
+</style>
+</head>
+<body>
+
+<div class="picker-header">
+  <h1>Theme Picker</h1>
+  <p>Click a palette and font to preview live. Tell me your final pick and I'll apply it.</p>
+</div>
+
+<div class="controls">
+  <!-- Dark palettes -->
+  <div class="ctrl-group">
+    <div class="ctrl-label">Dark Palettes</div>
+    <div class="ctrl-pills">
+      <button class="pill active" data-palette="graphite" onclick="setPalette(this)">Graphite &amp; Copper ✓</button>
+      <button class="pill" data-palette="slate"    onclick="setPalette(this)">Slate &amp; Ivory</button>
+      <button class="pill" data-palette="obsidian" onclick="setPalette(this)">Obsidian &amp; Brass</button>
+      <button class="pill" data-palette="midnight" onclick="setPalette(this)">Midnight &amp; Champagne</button>
+    </div>
+  </div>
+  <!-- Light palettes -->
+  <div class="ctrl-group">
+    <div class="ctrl-label">Light Palettes</div>
+    <div class="ctrl-pills">
+      <button class="pill light-pill" data-palette="paper"     onclick="setPalette(this)">Paper White</button>
+      <button class="pill light-pill" data-palette="canvas"    onclick="setPalette(this)">Warm Canvas</button>
+      <button class="pill light-pill" data-palette="cloud"     onclick="setPalette(this)">Cloud</button>
+      <button class="pill light-pill" data-palette="parchment" onclick="setPalette(this)">Parchment</button>
+    </div>
+  </div>
+  <!-- Fonts -->
+  <div class="ctrl-group">
+    <div class="ctrl-label">Font</div>
+    <div class="ctrl-pills">
+      <button class="pill active" data-font="dmsans"  onclick="setFont(this)">DM Sans ✓</button>
+      <button class="pill" data-font="inter"   onclick="setFont(this)">Inter</button>
+      <button class="pill" data-font="geist"   onclick="setFont(this)">Geist</button>
+      <button class="pill" data-font="outfit"  onclick="setFont(this)">Outfit</button>
+    </div>
+  </div>
+</div>
+
+<div class="preview-wrap">
+  <div class="current-badge" id="current-badge">
+    Currently applied to app: <strong>Graphite &amp; Copper · DM Sans</strong>
+  </div>
+  <div class="preview-label" id="preview-label">Previewing — Graphite &amp; Copper · DM Sans</div>
+
+  <div class="preview-frame theme-graphite font-dmsans" id="preview">
+    <div class="sim">
+
+      <!-- Sidebar -->
+      <div class="sim-sidebar">
+        <div class="sim-logo">
+          <div class="sim-logo-mark">
+            <i data-lucide="layers" style="width:12px;height:12px"></i>
+          </div>
+          <div>
+            <div class="sim-logo-text">self_mcp</div>
+            <div class="sim-logo-sub">personal</div>
+          </div>
+        </div>
+        <div class="sim-nav">
+          <div class="sim-nav-label">Workspace</div>
+          <div class="sim-nav-item active">
+            <i data-lucide="folder-open" style="width:13px;height:13px"></i>
+            <span style="flex:1">Projects</span>
+            <span class="sim-nav-badge">2</span>
+          </div>
+          <div class="sim-nav-label" style="margin-top:6px">Settings</div>
+          <div class="sim-nav-item">
+            <i data-lucide="cpu" style="width:13px;height:13px"></i>
+            <span>MCP Setup</span>
+          </div>
+        </div>
+        <div class="sim-footer">
+          <span class="sim-dot"></span> MCP active
+        </div>
+      </div>
+
+      <!-- Main -->
+      <div class="sim-main">
+        <div class="sim-topbar">
+          <h1>Projects</h1>
+          <div class="sim-btn">
+            <i data-lucide="plus" style="width:11px;height:11px"></i> New Project
+          </div>
+        </div>
+        <div class="sim-content">
+          <div class="sim-cards-col">
+
+            <!-- Project card -->
+            <div class="sim-card">
+              <div class="sim-card-header">
+                <div class="sim-card-icon">
+                  <i data-lucide="folder-open" style="width:13px;height:13px"></i>
+                </div>
+                <div style="flex:1;min-width:0">
+                  <div class="sim-card-title">API Design Rules</div>
+                  <div class="sim-card-desc">REST conventions &amp; error formats.</div>
+                </div>
+              </div>
+              <div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap">
+                <span class="sim-tag">rules</span>
+                <span class="sim-tag">backend</span>
+                <span class="sim-slug">api-design</span>
+              </div>
+              <div class="sim-stats">
+                <div class="sim-stat"><i data-lucide="file-text" style="width:10px;height:10px"></i><strong>4</strong> docs</div>
+                <div class="sim-stat"><i data-lucide="link-2" style="width:10px;height:10px"></i><strong>2</strong> links</div>
+                <div class="sim-stat"><i data-lucide="zap" style="width:10px;height:10px"></i><strong>610t</strong></div>
+              </div>
+            </div>
+
+            <!-- Empty state -->
+            <div class="sim-empty">
+              <i data-lucide="file-plus" style="width:34px;height:34px"></i>
+              <div class="sim-empty-title">No documents yet</div>
+              <div class="sim-empty-desc">Add a document to start building this project's knowledge base.</div>
+            </div>
+
+          </div>
+
+          <!-- Right panel -->
+          <div class="sim-rp">
+            <div class="sim-rp-head">Summary</div>
+            <div class="sim-rp-body">
+              <div class="sim-rp-stat">
+                <div class="sim-rp-val">4</div>
+                <div class="sim-rp-lbl">Documents</div>
+              </div>
+              <div class="sim-rp-stat">
+                <div class="sim-rp-val">610</div>
+                <div class="sim-rp-lbl">Tokens</div>
+              </div>
+              <div class="sim-rp-stat">
+                <div class="sim-rp-val">2</div>
+                <div class="sim-rp-lbl">Links</div>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+    </div>
+  </div><!-- /preview-frame -->
+
+  <!-- Swatch strip -->
+  <div class="swatch-strip" id="swatch-strip">
+    <div class="swatch" style="background:#111111"></div>
+    <div class="swatch" style="background:#1a1a1a"></div>
+    <div class="swatch" style="background:#222222"></div>
+    <div class="swatch" style="background:#2c2c2c"></div>
+    <div class="swatch" style="background:#e8e4de"></div>
+    <div class="swatch" style="background:#a0988e"></div>
+    <div class="swatch" style="background:#c07840"></div>
+    <div class="swatch" style="background:#789068"></div>
+    <div class="swatch" style="background:#b86060"></div>
+  </div>
+
+</div>
+
+<script>
+const PALETTES = {
+  graphite:  { name:'Graphite & Copper',      swatches:['#111111','#1a1a1a','#222222','#2c2c2c','#e8e4de','#a0988e','#c07840','#789068','#b86060'] },
+  slate:     { name:'Slate & Ivory',           swatches:['#0d1117','#161c24','#1d2530','#252e3d','#f0ebe0','#a8b0c4','#7b96e8','#5aab7e','#c46060'] },
+  obsidian:  { name:'Obsidian & Brass',        swatches:['#111010','#1a1918','#222120','#2e2c2a','#ede8e0','#a89f92','#c4a03a','#6a9e6a','#b86060'] },
+  midnight:  { name:'Midnight & Champagne',    swatches:['#0c0e14','#131720','#1a1f2e','#222840','#ecddb8','#a09278','#c4a96b','#6a9870','#b86868'] },
+  paper:     { name:'Paper White',             swatches:['#ffffff','#f7f7f8','#eeeeef','#e4e4e6','#111111','#555558','#0f7d7d','#2a8a50','#c04040'] },
+  canvas:    { name:'Warm Canvas',             swatches:['#faf8f5','#f2ede8','#e8e2da','#ddd6cc','#1a1714','#6a6058','#b05a28','#3a7a50','#b84040'] },
+  cloud:     { name:'Cloud',                   swatches:['#f8f9fc','#f0f2f7','#e6e9f2','#dde1ee','#0e1120','#5a6080','#4a60c8','#2a8858','#b84848'] },
+  parchment: { name:'Parchment',               swatches:['#f5f0e8','#ede6d8','#e4dace','#d8d0c0','#1e1a14','#6a6050','#6a7828','#3a7840','#b84848'] },
+};
+const FONTS = { dmsans:'DM Sans', inter:'Inter', geist:'Geist', outfit:'Outfit' };
+
+let cur = { palette:'graphite', font:'dmsans' };
+
+function setPalette(btn) {
+  document.querySelectorAll('.ctrl-pills .pill').forEach(p => {
+    if (p.dataset.palette) p.classList.remove('active');
+  });
+  btn.classList.add('active');
+  cur.palette = btn.dataset.palette;
+  apply();
+}
+function setFont(btn) {
+  document.querySelectorAll('.ctrl-pills .pill').forEach(p => {
+    if (p.dataset.font) p.classList.remove('active');
+  });
+  btn.classList.add('active');
+  cur.font = btn.dataset.font;
+  apply();
+}
+
+function apply() {
+  const frame = document.getElementById('preview');
+  frame.className = `preview-frame theme-${cur.palette} font-${cur.font}`;
+  const p = PALETTES[cur.palette], f = FONTS[cur.font];
+  document.getElementById('preview-label').textContent = `Previewing — ${p.name} · ${f}`;
+  document.getElementById('swatch-strip').innerHTML =
+    p.swatches.map(c => `<div class="swatch" style="background:${c}"></div>`).join('');
+  if (window.lucide) lucide.createIcons();
+}
+
+if (window.lucide) lucide.createIcons();
+</script>
+</body>
+</html>
