@@ -22,3 +22,8 @@ pip install -r requirements.txt
 python start.py
 ```
 
+## Preview
+
+
+![Dark Preview](./preview_dark.png)
+![Light Preview](./preview_light.png)
