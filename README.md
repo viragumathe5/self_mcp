@@ -14,7 +14,7 @@ Make sure you will have all the things at the same place for example your own do
 
 ## How to use it?
 
-Create an environment with python 3.11
+Create an environment with python 3.11,
 then:
 
 ```
