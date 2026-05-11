@@ -59,6 +59,12 @@ def make_mcp_server(store_id: str, store_name: str) -> Server:
                  description=f"Search links in '{store_name}' by keyword.",
                  inputSchema={"type": "object", "properties": {
                      "query": {"type": "string"}}, "required": ["query"]}),
+            Tool(name="list_issues",
+                 description=f"List all issues in '{store_name}', including status, priority, and whether they are assigned to the AI model.",
+                 inputSchema={"type": "object", "properties": {}}),
+            Tool(name="get_assigned_issues",
+                 description=f"List only the issues in '{store_name}' that are assigned to the AI model and need to be worked on.",
+                 inputSchema={"type": "object", "properties": {}}),
         ]
 
     @srv.call_tool()
@@ -109,6 +115,35 @@ def make_mcp_server(store_id: str, store_name: str) -> Server:
             ]
             return [TextContent(type="text", text="\n".join(lines))]
 
+        if name == "list_issues":
+            issues = storage.list_issues(store_id)
+            if not issues:
+                return [TextContent(type="text", text="No issues in this project.")]
+            lines = []
+            for i in issues:
+                assigned = " 🤖 **[ASSIGNED TO MODEL]**" if i.get("assigned_to_model") else ""
+                lines.append(
+                    f"- [{i['status'].upper()}] **{i['title']}** "
+                    f"(priority: {i['priority']}, id: `{i['id']}`){assigned}"
+                )
+                if i.get("description"):
+                    lines.append(f"  {i['description'][:120]}{'…' if len(i.get('description','')) > 120 else ''}")
+            return [TextContent(type="text", text="\n".join(lines))]
+
+        if name == "get_assigned_issues":
+            issues = [i for i in storage.list_issues(store_id) if i.get("assigned_to_model")]
+            if not issues:
+                return [TextContent(type="text", text="No issues currently assigned to the model.")]
+            parts = []
+            for i in issues:
+                parts.append(
+                    f"## {i['title']}\n"
+                    f"**Status:** {i['status']} | **Priority:** {i['priority']}\n"
+                    f"**Tags:** {', '.join(i.get('tags', [])) or 'none'}\n\n"
+                    f"{i.get('description', '_No description provided._')}"
+                )
+            return [TextContent(type="text", text="\n\n---\n\n".join(parts))]
+
         return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
     # ── Resources ─────────────────────────────────────────────────────────────
@@ -145,7 +180,7 @@ def make_mcp_server(store_id: str, store_name: str) -> Server:
     @srv.list_prompts()
     async def list_prompts():
         docs = storage.list_documents(store_id)
-        return [
+        prompts = [
             Prompt(
                 name=f"doc_{d['id']}",
                 description=f"[{store_name}] {d['title']}" + (
@@ -154,9 +189,42 @@ def make_mcp_server(store_id: str, store_name: str) -> Server:
             )
             for d in docs
         ]
+        # Add a special prompt listing all issues assigned to the model
+        assigned = [i for i in storage.list_issues(store_id) if i.get("assigned_to_model")]
+        if assigned:
+            prompts.append(Prompt(
+                name="assigned_issues",
+                description=f"[{store_name}] Issues assigned to the AI model — work on these",
+            ))
+        return prompts
 
     @srv.get_prompt()
     async def get_prompt(name: str, arguments: dict | None = None):
+        # Assigned-issues summary prompt
+        if name == "assigned_issues":
+            assigned = [i for i in storage.list_issues(store_id) if i.get("assigned_to_model")]
+            if not assigned:
+                raise ValueError("No issues currently assigned to the model.")
+            lines = [
+                f"The following issues in the '{store_name}' project have been assigned to you "
+                f"by the user. Please work on them:\n"
+            ]
+            for i in assigned:
+                lines.append(
+                    f"### {i['title']}\n"
+                    f"- **Status:** {i['status']}\n"
+                    f"- **Priority:** {i['priority']}\n"
+                    f"- **Tags:** {', '.join(i.get('tags', [])) or 'none'}\n"
+                    f"\n{i.get('description', '_No description provided._')}\n"
+                )
+            return GetPromptResult(
+                description=f"Issues assigned to AI — {store_name}",
+                messages=[PromptMessage(
+                    role="user",
+                    content=TextContent(type="text", text="\n".join(lines)),
+                )],
+            )
+        # Doc prompt
         doc_id = name.removeprefix("doc_")
         doc = storage.get_document(store_id, doc_id)
         if not doc:

@@ -1,6 +1,6 @@
 """
 storage.py — multi-store JSON persistence.
-Schema: { "stores": [ { id, name, slug, description, documents: [], links: [] } ] }
+Schema: { "stores": [ { id, name, slug, description, documents: [], links: [], issues: [] } ] }
 Stored at ~/.self_mcp/data.json
 
 Auto-migrates old single-store format on first load.
@@ -70,6 +70,7 @@ def _new_store(name: str, description: str = "") -> dict:
         "created_at": _now(),
         "documents": [],
         "links": [],
+        "issues": [],
     }
 
 
@@ -89,6 +90,7 @@ def list_stores() -> list[dict]:
             "doc_count": len(s.get("documents", [])),
             "link_count": len(s.get("links", [])),
             "total_tokens": sum(d.get("tokens", 0) for d in s.get("documents", [])),
+            "issue_count": len(s.get("issues", [])),
         })
     return result
 
@@ -149,6 +151,7 @@ def _store_summary(s: dict) -> dict:
         "doc_count": len(s.get("documents", [])),
         "link_count": len(s.get("links", [])),
         "total_tokens": sum(d.get("tokens", 0) for d in s.get("documents", [])),
+        "issue_count": len(s.get("issues", [])),
     }
 
 
@@ -267,3 +270,107 @@ def search_links(store_id: str, query: str) -> list[dict]:
     return [l for l in list_links(store_id)
             if q in l["title"].lower() or q in l["url"].lower()
             or q in l.get("description", "").lower()]
+
+
+# ── issues (scoped to store) ──────────────────────────────────────────────────
+
+def list_issues(store_id: str) -> list[dict]:
+    s = get_store(store_id)
+    return s.get("issues", []) if s else []
+
+
+def get_issue(store_id: str, issue_id: str) -> Optional[dict]:
+    return next((i for i in list_issues(store_id) if i["id"] == issue_id), None)
+
+
+def create_issue(
+    store_id: str,
+    title: str,
+    description: str = "",
+    status: str = "open",
+    priority: str = "medium",
+    tags: list[str] = [],
+) -> dict:
+    data = _load()
+    store = next((s for s in data["stores"] if s["id"] == store_id), None)
+    if not store:
+        raise ValueError("Store not found.")
+    if "issues" not in store:
+        store["issues"] = []
+    issue = {
+        "id": str(uuid.uuid4()),
+        "title": title,
+        "description": description,
+        "status": status,           # open | in_progress | done
+        "priority": priority,       # low | medium | high
+        "tags": tags,
+        "assigned_to_model": False,
+        "task_doc_id": None,        # id of auto-created task document, if any
+        "created_at": _now(),
+        "updated_at": _now(),
+    }
+    store["issues"].append(issue)
+    _save(data)
+    return issue
+
+
+def update_issue(
+    store_id: str,
+    issue_id: str,
+    title: str,
+    description: str = "",
+    status: str = "open",
+    priority: str = "medium",
+    tags: list[str] = [],
+) -> Optional[dict]:
+    data = _load()
+    store = next((s for s in data["stores"] if s["id"] == store_id), None)
+    if not store:
+        return None
+    for issue in store.get("issues", []):
+        if issue["id"] == issue_id:
+            issue.update({
+                "title": title,
+                "description": description,
+                "status": status,
+                "priority": priority,
+                "tags": tags,
+                "updated_at": _now(),
+            })
+            _save(data)
+            return issue
+    return None
+
+
+def set_issue_assignment(
+    store_id: str,
+    issue_id: str,
+    assigned: bool,
+    task_doc_id: Optional[str] = None,
+) -> Optional[dict]:
+    """Toggle the assigned_to_model flag; optionally record the task doc id."""
+    data = _load()
+    store = next((s for s in data["stores"] if s["id"] == store_id), None)
+    if not store:
+        return None
+    for issue in store.get("issues", []):
+        if issue["id"] == issue_id:
+            issue["assigned_to_model"] = assigned
+            issue["task_doc_id"] = task_doc_id
+            issue["updated_at"] = _now()
+            _save(data)
+            return issue
+    return None
+
+
+def delete_issue(store_id: str, issue_id: str) -> bool:
+    data = _load()
+    store = next((s for s in data["stores"] if s["id"] == store_id), None)
+    if not store:
+        return False
+    before = len(store.get("issues", []))
+    store["issues"] = [i for i in store.get("issues", []) if i["id"] != issue_id]
+    if len(store["issues"]) < before:
+        _save(data)
+        return True
+    return False

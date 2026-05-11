@@ -475,3 +475,70 @@ a { color: var(--accent); text-decoration: none; }
 .toast-item.success { border-left: 3px solid var(--green); }
 .toast-item.error   { border-left: 3px solid var(--red);   }
 @keyframes slide-up { from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:translateY(0)} }
+
+/* ══ ISSUES ══ */
+.issues-list { display: flex; flex-direction: column; gap: 8px; }
+
+.issue-card {
+  background: var(--bg2); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 14px 16px;
+  display: flex; flex-direction: column; gap: 8px;
+  transition: border-color .14s, box-shadow .14s;
+}
+.issue-card:hover { border-color: var(--border2); box-shadow: 0 4px 16px var(--shadow); }
+.issue-card.issue-done { opacity: .55; }
+.issue-card.issue-assigned { border-left: 3px solid var(--accent); }
+
+.issue-card-header { display: flex; align-items: center; gap: 6px; }
+.issue-card-actions { display: flex; gap: 3px; opacity: 0; transition: opacity .14s; }
+.issue-card:hover .issue-card-actions { opacity: 1; }
+
+/* Status badges */
+.issue-status-badge {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 8px; border-radius: 99px; font-size: 11px; font-weight: 600;
+  border: 1px solid;
+}
+.issue-status-open     { background: var(--bg3); color: var(--text2); border-color: var(--border2); }
+.issue-status-progress { background: var(--amber-dim); color: var(--amber); border-color: var(--amber-dim); }
+.issue-status-done     { background: var(--green-dim); color: var(--green); border-color: var(--green-dim); }
+
+/* Priority badges */
+.issue-priority-badge {
+  display: inline-flex; align-items: center; gap: 3px;
+  padding: 2px 7px; border-radius: 99px; font-size: 10px; font-weight: 600;
+  border: 1px solid;
+}
+.issue-priority-high   { background: var(--red-dim);   color: var(--red);   border-color: var(--red-dim); }
+.issue-priority-medium { background: var(--amber-dim); color: var(--amber); border-color: var(--amber-dim); }
+.issue-priority-low    { background: var(--bg3);       color: var(--text3); border-color: var(--border2); }
+
+.issue-title { font-size: 14px; font-weight: 700; color: var(--text); line-height: 1.4; }
+.issue-desc  { font-size: 12px; color: var(--text3); line-height: 1.65; }
+.issue-tags  { display: flex; flex-wrap: wrap; gap: 4px; }
+
+.issue-card-footer {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding-top: 8px; border-top: 1px solid var(--border);
+}
+.issue-date { font-size: 11px; color: var(--text3); display: flex; align-items: center; gap: 4px; }
+
+/* Assign toggle */
+.issue-assign-toggle {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 10px; border-radius: 99px; cursor: pointer;
+  border: 1px solid var(--border2); background: var(--bg3);
+  font-size: 11px; font-weight: 500; color: var(--text3);
+  transition: all .14s; user-select: none; flex-shrink: 0;
+}
+.issue-assign-toggle:hover { border-color: var(--accent); color: var(--accent); }
+.issue-assign-toggle.assigned {
+  background: var(--accent-dim); border-color: var(--accent);
+  color: var(--accent); font-weight: 700;
+}
+.issue-assign-dot {
+  width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
+  transition: background .14s;
+}
+.issue-assign-dot.on  { background: var(--accent); box-shadow: 0 0 0 2px var(--accent-dim); }
+.issue-assign-dot.off { background: var(--border2); }

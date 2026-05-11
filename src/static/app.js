@@ -117,6 +117,21 @@ async function _route(path) {
     return;
   }
 
+  // /projects/<projectId>/issues
+  const issuesMatch = path.match(/^\/projects\/([^/]+)\/issues$/);
+  if (issuesMatch) {
+    const projectId = issuesMatch[1];
+    if (!_currentProject || _currentProject.id !== projectId) {
+      const project = await apiFetch(`/api/stores/${projectId}`);
+      if (!project) { navigate('/'); return; }
+      _currentProject = project;
+      document.getElementById('project-breadcrumb-name').textContent = project.name;
+    }
+    _showView('project');
+    showProjectTab('issues', false);
+    return;
+  }
+
   // /projects/<projectId>
   const projectMatch = path.match(/^\/projects\/([^/]+)$/);
   if (projectMatch) {
@@ -214,23 +229,28 @@ async function loadProjects() {
 // ── Project tabs ──────────────────────────────────────────────────────────────
 function showProjectTab(tab, pushHistory = true) {
   _currentProjectTab = tab;
-  ['docs','links'].forEach(t => {
+  ['docs','links','issues'].forEach(t => {
     document.getElementById('ptab-' + t).classList.toggle('active', t === tab);
-    document.getElementById('project-view-' + t).style.display = t === tab ? (t === 'docs' ? 'flex' : 'block') : 'none';
+    const el = document.getElementById('project-view-' + t);
+    if (el) el.style.display = t === tab ? (t === 'docs' ? 'flex' : 'block') : 'none';
   });
   const acts = document.getElementById('project-topbar-actions');
   if (tab === 'docs') {
     acts.innerHTML = `<button class="btn btn-primary btn-sm" onclick="newDoc()"><i data-lucide="plus" style="width:13px;height:13px"></i> New Document</button>`;
-  } else {
+  } else if (tab === 'links') {
     acts.innerHTML = `<button class="btn btn-primary btn-sm" onclick="openLinkModal()"><i data-lucide="plus" style="width:13px;height:13px"></i> Save Link</button>`;
+  } else {
+    acts.innerHTML = `<button class="btn btn-primary btn-sm" onclick="openIssueModal()"><i data-lucide="plus" style="width:13px;height:13px"></i> New Issue</button>`;
   }
   initIcons();
   if (pushHistory && _currentProject) {
-    const path = tab === 'docs' ? `/projects/${_currentProject.id}` : `/projects/${_currentProject.id}/links`;
+    const suffix = tab === 'docs' ? '' : `/${tab}`;
+    const path = `/projects/${_currentProject.id}${suffix}`;
     history.pushState({ path }, '', path);
   }
-  if (tab === 'docs')  loadDocs();
-  if (tab === 'links') loadLinks();
+  if (tab === 'docs')   loadDocs();
+  if (tab === 'links')  loadLinks();
+  if (tab === 'issues') loadIssues();
 }
 
 // ── Docs ──────────────────────────────────────────────────────────────────────
@@ -593,7 +613,191 @@ function copyProjectConfig(slug, name) {
   toast(`Config for "${name}" copied`);
 }
 
-// ── Fetch ─────────────────────────────────────────────────────────────────────
+// ── Issues ────────────────────────────────────────────────────────────────────
+
+const PRIORITY_ORDER = { high: 0, medium: 1, low: 2 };
+const STATUS_LABEL   = { open: 'Open', in_progress: 'In Progress', done: 'Done' };
+const PRIORITY_LABEL = { low: 'Low', medium: 'Medium', high: 'High' };
+
+async function loadIssues() {
+  if (!_currentProject) return;
+  const issues = await apiFetch(`/api/stores/${_currentProject.id}/issues`);
+  if (!issues) return;
+  document.getElementById('ptab-issues-badge').textContent = issues.length;
+  const list  = document.getElementById('issues-list');
+  const empty = document.getElementById('issues-empty');
+  if (!issues.length) { list.innerHTML = ''; empty.style.display = ''; initIcons(); return; }
+  empty.style.display = 'none';
+  // Sort: assigned first, then by priority, then by status (open → in_progress → done)
+  const sorted = [...issues].sort((a, b) => {
+    if (b.assigned_to_model !== a.assigned_to_model) return b.assigned_to_model ? 1 : -1;
+    return (PRIORITY_ORDER[a.priority] ?? 1) - (PRIORITY_ORDER[b.priority] ?? 1);
+  });
+  list.innerHTML = sorted.map(issue => renderIssueCard(issue)).join('');
+  initIcons();
+}
+
+function renderIssueCard(issue) {
+  const isDone     = issue.status === 'done';
+  const assigned   = issue.assigned_to_model;
+  const statusCls  = { open: 'issue-status-open', in_progress: 'issue-status-progress', done: 'issue-status-done' }[issue.status] || '';
+  const priorityCls= { high: 'issue-priority-high', medium: 'issue-priority-medium', low: 'issue-priority-low' }[issue.priority] || '';
+  const tags = (issue.tags || []).map(t => `<span class="tag">${esc(t)}</span>`).join('');
+
+  return `
+    <div class="issue-card ${isDone ? 'issue-done' : ''} ${assigned ? 'issue-assigned' : ''}" id="issue-card-${issue.id}">
+      <div class="issue-card-header">
+        <div class="issue-status-badge ${statusCls}">
+          <i data-lucide="${isDone ? 'check-circle-2' : issue.status === 'in_progress' ? 'loader-2' : 'circle-dot'}" style="width:12px;height:12px"></i>
+          ${STATUS_LABEL[issue.status] || issue.status}
+        </div>
+        <div class="issue-priority-badge ${priorityCls}">
+          <i data-lucide="${issue.priority === 'high' ? 'chevrons-up' : issue.priority === 'low' ? 'chevrons-down' : 'minus'}" style="width:11px;height:11px"></i>
+          ${PRIORITY_LABEL[issue.priority] || issue.priority}
+        </div>
+        <div style="flex:1"></div>
+        <div class="issue-card-actions">
+          <button class="btn btn-ghost btn-xs" onclick="editIssue('${issue.id}')" title="Edit">
+            <i data-lucide="pencil" style="width:11px;height:11px"></i>
+          </button>
+          <button class="btn btn-danger btn-xs" onclick="deleteIssue('${issue.id}')" title="Delete">
+            <i data-lucide="trash-2" style="width:11px;height:11px"></i>
+          </button>
+        </div>
+      </div>
+      <div class="issue-title">${esc(issue.title)}</div>
+      ${issue.description ? `<div class="issue-desc">${esc(issue.description.slice(0, 200))}${issue.description.length > 200 ? '…' : ''}</div>` : ''}
+      ${tags ? `<div class="issue-tags">${tags}</div>` : ''}
+      <div class="issue-card-footer">
+        <span class="issue-date"><i data-lucide="clock" style="width:10px;height:10px"></i> ${fmt(issue.updated_at)}</span>
+        <div class="issue-assign-toggle ${assigned ? 'assigned' : ''}" onclick="toggleAssign('${issue.id}', ${assigned})" title="${assigned ? 'Click to unassign from model' : 'Click to assign to model'}">
+          <div class="issue-assign-icon"><i data-lucide="${assigned ? 'bot' : 'bot'}" style="width:12px;height:12px"></i></div>
+          <span>${assigned ? '✦ Assigned to model' : 'Assign to model'}</span>
+          <div class="issue-assign-dot ${assigned ? 'on' : 'off'}"></div>
+        </div>
+      </div>
+    </div>`;
+}
+
+function openIssueModal(issue = null) {
+  document.getElementById('im-id').value       = issue?.id || '';
+  document.getElementById('im-title').value    = issue?.title || '';
+  document.getElementById('im-desc').value     = issue?.description || '';
+  document.getElementById('im-status').value   = issue?.status || 'open';
+  document.getElementById('im-priority').value = issue?.priority || 'medium';
+  document.getElementById('im-tags').value     = (issue?.tags || []).join(', ');
+  document.getElementById('issue-modal-title').textContent = issue ? 'Edit Issue' : 'New Issue';
+  document.getElementById('issue-modal').classList.add('open');
+  setTimeout(() => document.getElementById('im-title').focus(), 50);
+}
+
+function closeIssueModal() { document.getElementById('issue-modal').classList.remove('open'); }
+
+async function editIssue(id) {
+  const issue = await apiFetch(`/api/stores/${_currentProject.id}/issues/${id}`);
+  if (issue) openIssueModal(issue);
+}
+
+async function saveIssue() {
+  if (!_currentProject) return;
+  const id       = document.getElementById('im-id').value;
+  const title    = document.getElementById('im-title').value.trim();
+  const desc     = document.getElementById('im-desc').value.trim();
+  const status   = document.getElementById('im-status').value;
+  const priority = document.getElementById('im-priority').value;
+  const tags     = document.getElementById('im-tags').value.split(',').map(t => t.trim()).filter(Boolean);
+  if (!title) { toast('Title is required.', 'error'); return; }
+  const url    = id ? `/api/stores/${_currentProject.id}/issues/${id}` : `/api/stores/${_currentProject.id}/issues`;
+  const method = id ? 'PUT' : 'POST';
+  const saved  = await apiFetch(url, { method, body: { title, description: desc, status, priority, tags } });
+  if (!saved) return;
+  closeIssueModal();
+  loadIssues();
+  toast(id ? 'Issue updated.' : 'Issue created.');
+}
+
+async function deleteIssue(id) {
+  if (!_currentProject) return;
+  if (!confirm('Delete this issue permanently?')) return;
+  // If it has a task doc, delete that too
+  const issue = await apiFetch(`/api/stores/${_currentProject.id}/issues/${id}`);
+  if (issue?.task_doc_id) {
+    await apiFetch(`/api/stores/${_currentProject.id}/documents/${issue.task_doc_id}`, { method: 'DELETE', noBody: true });
+  }
+  await apiFetch(`/api/stores/${_currentProject.id}/issues/${id}`, { method: 'DELETE', noBody: true });
+  loadIssues();
+  toast('Issue deleted.');
+}
+
+async function toggleAssign(issueId, currentlyAssigned) {
+  if (!_currentProject) return;
+  const newAssigned = !currentlyAssigned;
+
+  if (newAssigned) {
+    // Fetch the issue to build the task doc
+    const issue = await apiFetch(`/api/stores/${_currentProject.id}/issues/${issueId}`);
+    if (!issue) return;
+
+    // Create a task document in the project
+    const taskTitle   = `[Issue] ${issue.title}`;
+    const taskContent = buildTaskDocContent(issue);
+    const taskDoc = await apiFetch(`/api/stores/${_currentProject.id}/documents`, {
+      method: 'POST',
+      body: { title: taskTitle, content: taskContent, tags: ['issue', 'task', ...(issue.tags || [])] },
+    });
+    if (!taskDoc) return;
+
+    // Mark the issue as assigned, record the task doc id
+    await apiFetch(`/api/stores/${_currentProject.id}/issues/${issueId}/assign`, {
+      method: 'POST',
+      body: { assigned: true, task_doc_id: taskDoc.id },
+    });
+    toast('Issue assigned to model — task document created.');
+  } else {
+    // Fetch current issue to find any linked task doc
+    const issue = await apiFetch(`/api/stores/${_currentProject.id}/issues/${issueId}`);
+    if (issue?.task_doc_id) {
+      await apiFetch(`/api/stores/${_currentProject.id}/documents/${issue.task_doc_id}`, { method: 'DELETE', noBody: true });
+    }
+    await apiFetch(`/api/stores/${_currentProject.id}/issues/${issueId}/assign`, {
+      method: 'POST',
+      body: { assigned: false, task_doc_id: null },
+    });
+    toast('Issue unassigned from model — task document removed.');
+  }
+
+  loadIssues();
+}
+
+function buildTaskDocContent(issue) {
+  const priorityEmoji = { high: '🔴', medium: '🟡', low: '🟢' }[issue.priority] || '⚪';
+  return `# ${issue.title}
+
+**Type:** Issue task  
+**Priority:** ${priorityEmoji} ${issue.priority}  
+**Status:** ${issue.status}  
+**Tags:** ${(issue.tags || []).join(', ') || 'none'}
+
+## Description
+
+${issue.description || '_No description provided._'}
+
+## Instructions for the AI model
+
+Yes, I want to work on this. The user has assigned this issue to you. Please:
+
+1. Analyse the issue described above.
+2. Propose a plan before making changes.
+3. Implement the solution, making minimal focused changes.
+4. Update the issue status to \`done\` when complete (via the self_mcp GUI).
+
+## Acceptance criteria
+
+- The issue described above is resolved.
+- No regressions are introduced.
+- Changes are explained clearly in the conversation.
+`;
+}
 async function apiFetch(url, opts = {}) {
   try {
     const res = await fetch(url, {
@@ -619,6 +823,7 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
     if (document.getElementById('project-modal').classList.contains('open')) { closeProjectModal(); return; }
     if (document.getElementById('link-modal').classList.contains('open'))    { closeLinkModal(); return; }
+    if (document.getElementById('issue-modal').classList.contains('open'))   { closeIssueModal(); return; }
   }
   if ((e.metaKey || e.ctrlKey) && e.key === 's') {
     e.preventDefault();

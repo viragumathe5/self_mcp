@@ -9,6 +9,9 @@ Routes:
   GET/PUT/DELETE  /api/stores/<store_id>/documents/<doc_id>
   GET/POST        /api/stores/<store_id>/links
   DELETE          /api/stores/<store_id>/links/<link_id>
+  GET/POST        /api/stores/<store_id>/issues
+  GET/PUT/DELETE  /api/stores/<store_id>/issues/<issue_id>
+  POST            /api/stores/<store_id>/issues/<issue_id>/assign
   GET             /api/token-count?text=...
 """
 from fastapi import FastAPI, HTTPException
@@ -50,6 +53,25 @@ class LinkCreate(BaseModel):
     url: str
     description: str = ""
     tags: list[str] = []
+
+
+class IssueCreate(BaseModel):
+    title: str
+    description: str = ""
+    status: str = "open"
+    priority: str = "medium"
+    tags: list[str] = []
+
+class IssueUpdate(BaseModel):
+    title: str
+    description: str = ""
+    status: str = "open"
+    priority: str = "medium"
+    tags: list[str] = []
+
+class IssueAssign(BaseModel):
+    assigned: bool
+    task_doc_id: str | None = None
 
 
 # ── stores ────────────────────────────────────────────────────────────────────
@@ -139,6 +161,57 @@ def create_link(store_id: str, body: LinkCreate):
 def delete_link(store_id: str, link_id: str):
     if not storage.delete_link(store_id, link_id):
         raise HTTPException(404, "Link not found")
+
+
+# ── issues ────────────────────────────────────────────────────────────────────
+
+@app.get("/api/stores/{store_id}/issues")
+def get_issues(store_id: str):
+    _require_store(store_id)
+    return storage.list_issues(store_id)
+
+@app.post("/api/stores/{store_id}/issues", status_code=201)
+def create_issue(store_id: str, body: IssueCreate):
+    _require_store(store_id)
+    try:
+        return storage.create_issue(
+            store_id, body.title, body.description,
+            body.status, body.priority, body.tags,
+        )
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+
+@app.get("/api/stores/{store_id}/issues/{issue_id}")
+def get_issue(store_id: str, issue_id: str):
+    issue = storage.get_issue(store_id, issue_id)
+    if not issue:
+        raise HTTPException(404, "Issue not found")
+    return issue
+
+@app.put("/api/stores/{store_id}/issues/{issue_id}")
+def update_issue(store_id: str, issue_id: str, body: IssueUpdate):
+    issue = storage.update_issue(
+        store_id, issue_id, body.title, body.description,
+        body.status, body.priority, body.tags,
+    )
+    if not issue:
+        raise HTTPException(404, "Issue not found")
+    return issue
+
+@app.delete("/api/stores/{store_id}/issues/{issue_id}", status_code=204)
+def delete_issue(store_id: str, issue_id: str):
+    if not storage.delete_issue(store_id, issue_id):
+        raise HTTPException(404, "Issue not found")
+
+@app.post("/api/stores/{store_id}/issues/{issue_id}/assign")
+def assign_issue(store_id: str, issue_id: str, body: IssueAssign):
+    """Set or clear the assigned_to_model flag; record optional task_doc_id."""
+    issue = storage.set_issue_assignment(
+        store_id, issue_id, body.assigned, body.task_doc_id
+    )
+    if not issue:
+        raise HTTPException(404, "Issue not found")
+    return issue
 
 
 # ── utils ─────────────────────────────────────────────────────────────────────

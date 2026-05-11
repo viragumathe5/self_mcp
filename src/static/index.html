@@ -91,6 +91,10 @@
           <i data-lucide="link-2" style="width:12px;height:12px"></i> Links
           <span class="nav-badge" id="ptab-links-badge">0</span>
         </button>
+        <button class="project-tab" id="ptab-issues" onclick="showProjectTab('issues')">
+          <i data-lucide="circle-dot" style="width:12px;height:12px"></i> Issues
+          <span class="nav-badge" id="ptab-issues-badge">0</span>
+        </button>
       </div>
 
       <!-- Docs sub-view -->
@@ -138,6 +142,18 @@
             <div class="empty-icon"><i data-lucide="link-2" style="width:48px;height:48px"></i></div>
             <div class="empty-title">No links saved</div>
             <div class="empty-desc">Save reference URLs to surface them via this project's MCP endpoint.</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Issues sub-view -->
+      <div id="project-view-issues" style="display:none;flex:1;overflow:hidden;">
+        <div class="content">
+          <div id="issues-list" class="issues-list"></div>
+          <div id="issues-empty" class="empty" style="display:none">
+            <div class="empty-icon"><i data-lucide="circle-dot" style="width:48px;height:48px"></i></div>
+            <div class="empty-title">No issues yet</div>
+            <div class="empty-desc">Track bugs, tasks, and feature requests. Assign them to the AI model to have it work on them automatically.</div>
           </div>
         </div>
       </div>
@@ -321,6 +337,54 @@
     <div class="modal-foot">
       <button class="btn btn-secondary btn-sm" onclick="closeLinkModal()">Cancel</button>
       <button class="btn btn-primary btn-sm" onclick="saveLink()"><i data-lucide="save" style="width:12px;height:12px"></i> Save</button>
+    </div>
+  </div>
+</div>
+
+<div class="overlay" id="issue-modal">
+  <div class="modal" style="max-width:520px">
+    <div class="modal-head">
+      <h2 id="issue-modal-title">New Issue</h2>
+      <button class="modal-close" onclick="closeIssueModal()"><i data-lucide="x" style="width:13px;height:13px"></i></button>
+    </div>
+    <div class="modal-body">
+      <input type="hidden" id="im-id">
+      <div class="form-field">
+        <label>Title</label>
+        <input class="form-input" id="im-title" placeholder="e.g. Fix auth token expiry bug">
+      </div>
+      <div class="form-field">
+        <label>Description (optional, supports Markdown)</label>
+        <textarea class="form-input" id="im-desc" rows="4" placeholder="Describe the issue, steps to reproduce, expected behaviour…" style="resize:vertical;font-family:var(--mono);font-size:12px;line-height:1.7"></textarea>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div class="form-field">
+          <label>Status</label>
+          <select class="form-input" id="im-status">
+            <option value="open">Open</option>
+            <option value="in_progress">In Progress</option>
+            <option value="done">Done</option>
+          </select>
+        </div>
+        <div class="form-field">
+          <label>Priority</label>
+          <select class="form-input" id="im-priority">
+            <option value="low">Low</option>
+            <option value="medium" selected>Medium</option>
+            <option value="high">High</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-field">
+        <label>Tags (comma-separated)</label>
+        <input class="form-input" id="im-tags" placeholder="bug, frontend, auth">
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-secondary btn-sm" onclick="closeIssueModal()">Cancel</button>
+      <button class="btn btn-primary btn-sm" onclick="saveIssue()">
+        <i data-lucide="save" style="width:12px;height:12px"></i> Save Issue
+      </button>
     </div>
   </div>
 </div>
