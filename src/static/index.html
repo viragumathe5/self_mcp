@@ -69,7 +69,7 @@
     </div>
 
     <!-- View: Project inside -->
-    <div id="view-project" style="display:none;flex-direction:column;flex:1;overflow:hidden;">
+    <div id="view-project" style="display:none;">
       <div class="topbar">
         <div class="topbar-left">
           <div class="breadcrumb">
@@ -95,10 +95,14 @@
           <i data-lucide="circle-dot" style="width:12px;height:12px"></i> Issues
           <span class="nav-badge" id="ptab-issues-badge">0</span>
         </button>
+        <button class="project-tab" id="ptab-plans" onclick="showProjectTab('plans')">
+          <i data-lucide="git-branch" style="width:12px;height:12px"></i> Plans
+          <span class="nav-badge" id="ptab-plans-badge">0</span>
+        </button>
       </div>
 
       <!-- Docs sub-view -->
-      <div id="project-view-docs" class="body-split" style="flex:1;overflow:hidden;">
+      <div id="project-view-docs" class="body-split">
         <div class="content">
           <div id="docs-grid" class="docs-grid"></div>
           <div id="docs-empty" class="empty" style="display:none">
@@ -135,7 +139,7 @@
       </div>
 
       <!-- Links sub-view -->
-      <div id="project-view-links" style="display:none;flex:1;overflow:hidden;">
+      <div id="project-view-links" style="display:none;">
         <div class="content">
           <div id="links-grid" class="links-grid"></div>
           <div id="links-empty" class="empty" style="display:none">
@@ -147,7 +151,7 @@
       </div>
 
       <!-- Issues sub-view -->
-      <div id="project-view-issues" style="display:none;flex:1;overflow:hidden;">
+      <div id="project-view-issues" style="display:none;">
         <div class="content">
           <div id="issues-list" class="issues-list"></div>
           <div id="issues-empty" class="empty" style="display:none">
@@ -157,10 +161,39 @@
           </div>
         </div>
       </div>
+
+      <!-- Plans sub-view -->
+      <div id="project-view-plans" style="display:none;">
+        <!-- Plan list pane -->
+        <div id="plans-list-pane">
+          <div class="content">
+            <div id="plans-list"></div>
+            <div id="plans-empty" class="empty" style="display:none">
+              <div class="empty-icon"><i data-lucide="git-branch" style="width:48px;height:48px"></i></div>
+              <div class="empty-title">No plans yet</div>
+              <div class="empty-desc">Describe a big idea and let the AI break it into focused subtasks that agents can work on in parallel.</div>
+            </div>
+          </div>
+        </div>
+        <!-- Plan detail pane -->
+        <div id="plan-detail-pane" style="display:none;">
+          <div class="plan-detail-header">
+            <button class="btn btn-ghost btn-sm" onclick="closePlanDetail()">
+              <i data-lucide="arrow-left" style="width:13px;height:13px"></i> All Plans
+            </button>
+            <h2 id="plan-detail-title" style="font-size:15px;font-weight:600;margin:0;flex:1;padding:0 12px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">—</h2>
+            <span id="plan-detail-status-badge" class="plan-status-badge"></span>
+            <button class="btn btn-danger btn-sm" id="plan-detail-del-btn" onclick="deletePlan()" style="display:none">
+              <i data-lucide="trash-2" style="width:12px;height:12px"></i>
+            </button>
+          </div>
+          <div id="plan-detail-body" class="content" style="flex:1;overflow-y:auto;padding:16px 20px;"></div>
+        </div>
+      </div>
     </div>
 
     <!-- View: MCP Setup -->
-    <div id="view-setup" style="display:none">
+    <div id="view-setup" style="display:none;">
       <div class="topbar"><h1>MCP Setup</h1></div>
       <div class="content">
         <div class="setup-wrap">
@@ -384,6 +417,37 @@
       <button class="btn btn-secondary btn-sm" onclick="closeIssueModal()">Cancel</button>
       <button class="btn btn-primary btn-sm" onclick="saveIssue()">
         <i data-lucide="save" style="width:12px;height:12px"></i> Save Issue
+      </button>
+    </div>
+  </div>
+</div>
+
+<div class="overlay" id="plan-modal">
+  <div class="modal" style="max-width:560px">
+    <div class="modal-head">
+      <h2 id="plan-modal-title">New Plan</h2>
+      <button class="modal-close" onclick="closePlanModal()"><i data-lucide="x" style="width:13px;height:13px"></i></button>
+    </div>
+    <div class="modal-body">
+      <div class="form-field">
+        <label>Plan title</label>
+        <input class="form-input" id="plm-title" placeholder="e.g. Build auth module">
+      </div>
+      <div class="form-field">
+        <label>Describe the big idea</label>
+        <textarea class="form-input" id="plm-idea" rows="5"
+          placeholder="Describe what you want to achieve. The AI will break this into subtasks automatically when you connect via MCP and call create_plan…"
+          style="resize:vertical;font-size:13px;line-height:1.7"></textarea>
+      </div>
+      <div class="plan-modal-hint">
+        <i data-lucide="info" style="width:12px;height:12px;flex-shrink:0"></i>
+        <span>This stores your idea. To actually decompose it into subtasks, ask your AI client (OpenCode / Claude) to call the <code>create_plan</code> MCP tool with this idea.</span>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-secondary btn-sm" onclick="closePlanModal()">Cancel</button>
+      <button class="btn btn-primary btn-sm" onclick="savePlanIdea()">
+        <i data-lucide="save" style="width:12px;height:12px"></i> Save Idea
       </button>
     </div>
   </div>

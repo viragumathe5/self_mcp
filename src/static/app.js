@@ -8,6 +8,7 @@ let _currentProjectTab = 'docs';
 let _dirty             = false;
 let _setupProjects     = [];
 let _configFormat      = 'opencode';
+let _currentPlan       = null;
 
 // ── Icons ───────────────────────────────────────────────────────────────────
 function initIcons() { if (window.lucide) lucide.createIcons(); }
@@ -132,6 +133,21 @@ async function _route(path) {
     return;
   }
 
+  // /projects/<projectId>/plans
+  const plansMatch = path.match(/^\/projects\/([^/]+)\/plans$/);
+  if (plansMatch) {
+    const projectId = plansMatch[1];
+    if (!_currentProject || _currentProject.id !== projectId) {
+      const project = await apiFetch(`/api/stores/${projectId}`);
+      if (!project) { navigate('/'); return; }
+      _currentProject = project;
+      document.getElementById('project-breadcrumb-name').textContent = project.name;
+    }
+    _showView('project');
+    showProjectTab('plans', false);
+    return;
+  }
+
   // /projects/<projectId>
   const projectMatch = path.match(/^\/projects\/([^/]+)$/);
   if (projectMatch) {
@@ -171,7 +187,13 @@ function _showView(name) {
   ['projects','project','setup'].forEach(v => {
     const el = document.getElementById('view-' + v);
     if (!el) return;
-    el.style.display = v === name ? (v === 'project' ? 'flex' : '') : 'none';
+    // CSS defines the correct display (flex) for each view.
+    // We only ever set display:none to hide; removing it lets CSS take over.
+    if (v === name) {
+      el.style.removeProperty('display');
+    } else {
+      el.style.display = 'none';
+    }
   });
   document.getElementById('nav-projects').classList.toggle('active', name === 'projects' || name === 'project');
   document.getElementById('nav-setup').classList.toggle('active', name === 'setup');
@@ -229,16 +251,25 @@ async function loadProjects() {
 // ── Project tabs ──────────────────────────────────────────────────────────────
 function showProjectTab(tab, pushHistory = true) {
   _currentProjectTab = tab;
-  ['docs','links','issues'].forEach(t => {
+  ['docs','links','issues','plans'].forEach(t => {
     document.getElementById('ptab-' + t).classList.toggle('active', t === tab);
     const el = document.getElementById('project-view-' + t);
-    if (el) el.style.display = t === tab ? (t === 'docs' ? 'flex' : 'block') : 'none';
+    if (!el) return;
+    // CSS defines the correct flex layout for each sub-view.
+    // Only set display:none to hide; remove it to let CSS restore flex.
+    if (t === tab) {
+      el.style.removeProperty('display');
+    } else {
+      el.style.display = 'none';
+    }
   });
   const acts = document.getElementById('project-topbar-actions');
   if (tab === 'docs') {
     acts.innerHTML = `<button class="btn btn-primary btn-sm" onclick="newDoc()"><i data-lucide="plus" style="width:13px;height:13px"></i> New Document</button>`;
   } else if (tab === 'links') {
     acts.innerHTML = `<button class="btn btn-primary btn-sm" onclick="openLinkModal()"><i data-lucide="plus" style="width:13px;height:13px"></i> Save Link</button>`;
+  } else if (tab === 'plans') {
+    acts.innerHTML = `<button class="btn btn-primary btn-sm" onclick="openPlanModal()"><i data-lucide="plus" style="width:13px;height:13px"></i> New Plan</button>`;
   } else {
     acts.innerHTML = `<button class="btn btn-primary btn-sm" onclick="openIssueModal()"><i data-lucide="plus" style="width:13px;height:13px"></i> New Issue</button>`;
   }
@@ -251,6 +282,7 @@ function showProjectTab(tab, pushHistory = true) {
   if (tab === 'docs')   loadDocs();
   if (tab === 'links')  loadLinks();
   if (tab === 'issues') loadIssues();
+  if (tab === 'plans')  loadPlans();
 }
 
 // ── Docs ──────────────────────────────────────────────────────────────────────
@@ -798,6 +830,168 @@ Yes, I want to work on this. The user has assigned this issue to you. Please:
 - Changes are explained clearly in the conversation.
 `;
 }
+// ── Plans ─────────────────────────────────────────────────────────────────────
+
+const PLAN_STATUS_LABEL = { draft: 'Draft', active: 'Active', in_progress: 'In Progress', done: 'Done' };
+const SUBTASK_STATUS_LABEL = { pending: 'Pending', in_progress: 'In Progress', done: 'Done', blocked: 'Blocked' };
+
+async function loadPlans() {
+  if (!_currentProject) return;
+  const plans = await apiFetch(`/api/stores/${_currentProject.id}/plans`);
+  if (!plans) return;
+  document.getElementById('ptab-plans-badge').textContent = plans.length;
+  const list  = document.getElementById('plans-list');
+  const empty = document.getElementById('plans-empty');
+  // If detail pane is open, refresh it too
+  if (_currentPlan) {
+    const fresh = plans.find(p => p.id === _currentPlan.id);
+    if (fresh) { _currentPlan = fresh; renderPlanDetail(fresh); }
+  }
+  if (!plans.length) { list.innerHTML = ''; empty.style.display = ''; initIcons(); return; }
+  empty.style.display = 'none';
+  list.innerHTML = plans.map(p => renderPlanCard(p)).join('');
+  initIcons();
+}
+
+function renderPlanCard(p) {
+  const done  = p.subtasks.filter(s => s.status === 'done').length;
+  const total = p.subtasks.length;
+  const pct   = total ? Math.round((done / total) * 100) : 0;
+  const statusCls = { draft: 'plan-status-draft', active: 'plan-status-active', in_progress: 'plan-status-progress', done: 'plan-status-done' }[p.status] || '';
+  return `
+    <div class="plan-card" onclick="openPlanDetail('${p.id}')">
+      <div class="plan-card-header">
+        <div class="plan-card-title">${esc(p.title)}</div>
+        <span class="plan-status-badge ${statusCls}">${PLAN_STATUS_LABEL[p.status] || p.status}</span>
+      </div>
+      <div class="plan-card-idea">${esc((p.idea || '').slice(0, 120))}${(p.idea || '').length > 120 ? '…' : ''}</div>
+      ${total ? `
+        <div class="plan-progress-row">
+          <div class="plan-progress-track"><div class="plan-progress-fill" style="width:${pct}%"></div></div>
+          <span class="plan-progress-label">${done}/${total} subtasks</span>
+        </div>` : '<div class="plan-card-hint">No subtasks yet — ask your AI client to call <code>create_plan</code>.</div>'}
+      <div class="plan-card-footer">
+        <span class="plan-card-date"><i data-lucide="clock" style="width:10px;height:10px"></i> ${fmt(p.updated_at)}</span>
+        <button class="btn btn-danger btn-xs" onclick="event.stopPropagation();deletePlanById('${p.id}')">
+          <i data-lucide="trash-2" style="width:10px;height:10px"></i>
+        </button>
+      </div>
+    </div>`;
+}
+
+async function openPlanDetail(planId) {
+  const plan = await apiFetch(`/api/stores/${_currentProject.id}/plans/${planId}`);
+  if (!plan) return;
+  _currentPlan = plan;
+  document.getElementById('plans-list-pane').style.display = 'none';
+  const detail = document.getElementById('plan-detail-pane');
+  detail.style.removeProperty('display');
+  renderPlanDetail(plan);
+  initIcons();
+}
+
+function closePlanDetail() {
+  _currentPlan = null;
+  document.getElementById('plan-detail-pane').style.display = 'none';
+  document.getElementById('plans-list-pane').style.removeProperty('display');
+  loadPlans();
+}
+
+function renderPlanDetail(plan) {
+  document.getElementById('plan-detail-title').textContent = plan.title;
+  const statusCls = { draft: 'plan-status-draft', active: 'plan-status-active', in_progress: 'plan-status-progress', done: 'plan-status-done' }[plan.status] || '';
+  const badge = document.getElementById('plan-detail-status-badge');
+  badge.className = `plan-status-badge ${statusCls}`;
+  badge.textContent = PLAN_STATUS_LABEL[plan.status] || plan.status;
+  document.getElementById('plan-detail-del-btn').style.display = '';
+
+  const done  = plan.subtasks.filter(s => s.status === 'done').length;
+  const total = plan.subtasks.length;
+  const pct   = total ? Math.round((done / total) * 100) : 0;
+
+  let html = `<div class="plan-detail-idea">${esc(plan.idea || '')}</div>`;
+
+  if (total) {
+    html += `<div class="plan-progress-row">
+      <div class="plan-progress-track"><div class="plan-progress-fill" style="width:${pct}%"></div></div>
+      <span class="plan-progress-label">${done}/${total} done</span>
+    </div>
+    <div class="st-timeline">`;
+
+    for (const st of plan.subtasks) {
+      const stIcon = { done: 'check-circle-2', in_progress: 'loader-2', blocked: 'ban', pending: 'circle' }[st.status] || 'circle';
+      const stState = st.status; // pending | in_progress | done | blocked
+      const agentBit = st.assigned_agent ? `<span class="st-row-agent"><i data-lucide="bot" style="width:9px;height:9px"></i>${esc(st.assigned_agent)}</span>` : '';
+      const summaryBit = st.output_summary ? `<div class="st-row-summary">${esc(st.output_summary)}</div>` : '';
+      const depBit = st.depends_on?.length ? `<span class="st-row-dep">after ${st.depends_on.map(i=>`#${i+1}`).join(', ')}</span>` : '';
+      html += `<div class="st-row st-row-${stState}">
+        <div class="st-row-dot"><i data-lucide="${stIcon}" style="width:12px;height:12px"></i></div>
+        <div class="st-row-body">
+          <div class="st-row-head">
+            <span class="st-row-num">${st.index+1}</span>
+            <span class="st-row-title">${esc(st.title)}</span>
+            ${depBit}${agentBit}
+            <span class="st-row-status">${SUBTASK_STATUS_LABEL[st.status]||st.status}</span>
+          </div>
+          ${summaryBit}
+        </div>
+      </div>`;
+    }
+    html += `</div>`;
+  } else {
+    html += `<div class="st-timeline-empty">
+      <i data-lucide="git-branch" style="width:28px;height:28px"></i>
+      <span>Waiting for AI to decompose into subtasks…</span>
+    </div>`;
+  }
+
+
+
+  document.getElementById('plan-detail-body').innerHTML = html;
+  initIcons();
+}
+
+function openPlanModal() {
+  document.getElementById('plm-title').value = '';
+  document.getElementById('plm-idea').value  = '';
+  document.getElementById('plan-modal').classList.add('open');
+  setTimeout(() => document.getElementById('plm-title').focus(), 50);
+}
+
+function closePlanModal() { document.getElementById('plan-modal').classList.remove('open'); }
+
+async function savePlanIdea() {
+  if (!_currentProject) return;
+  const title = document.getElementById('plm-title').value.trim();
+  const idea  = document.getElementById('plm-idea').value.trim();
+  if (!title) { toast('Title is required.', 'error'); return; }
+  if (!idea)  { toast('Please describe the idea.', 'error'); return; }
+  // Create plan with no subtasks — AI will decompose via MCP
+  const plan = await apiFetch(`/api/stores/${_currentProject.id}/plans`, {
+    method: 'POST',
+    body: { title, idea, subtasks: [] },
+  });
+  if (!plan) return;
+  closePlanModal();
+  loadPlans();
+  toast('Plan created — ask your AI client to call create_plan to decompose it.');
+}
+
+async function deletePlan() {
+  if (!_currentPlan || !_currentProject) return;
+  await deletePlanById(_currentPlan.id);
+  closePlanDetail();
+}
+
+async function deletePlanById(planId) {
+  if (!_currentProject) return;
+  if (!confirm('Delete this plan and all its subtasks?')) return;
+  await apiFetch(`/api/stores/${_currentProject.id}/plans/${planId}`, { method: 'DELETE', noBody: true });
+  if (_currentPlan?.id === planId) closePlanDetail();
+  else loadPlans();
+  toast('Plan deleted.');
+}
+
 async function apiFetch(url, opts = {}) {
   try {
     const res = await fetch(url, {
@@ -824,6 +1018,7 @@ document.addEventListener('keydown', e => {
     if (document.getElementById('project-modal').classList.contains('open')) { closeProjectModal(); return; }
     if (document.getElementById('link-modal').classList.contains('open'))    { closeLinkModal(); return; }
     if (document.getElementById('issue-modal').classList.contains('open'))   { closeIssueModal(); return; }
+    if (document.getElementById('plan-modal').classList.contains('open'))    { closePlanModal(); return; }
   }
   if ((e.metaKey || e.ctrlKey) && e.key === 's') {
     e.preventDefault();

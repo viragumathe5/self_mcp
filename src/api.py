@@ -74,6 +74,23 @@ class IssueAssign(BaseModel):
     task_doc_id: str | None = None
 
 
+class PlanCreate(BaseModel):
+    title: str
+    idea: str
+    subtasks: list[dict]
+    max_tokens_per_subtask: int = 1500
+
+class SubtaskComplete(BaseModel):
+    output: str
+    output_summary: str = ""
+
+class SubtaskClaim(BaseModel):
+    agent_name: str = "agent"
+
+class PlanFinalOutput(BaseModel):
+    output: str
+
+
 # ── stores ────────────────────────────────────────────────────────────────────
 
 @app.get("/api/stores")
@@ -223,6 +240,131 @@ def token_count(text: str):
 def _require_store(store_id: str):
     if not storage.get_store(store_id):
         raise HTTPException(404, "Store not found")
+
+
+# ── plans ──────────────────────────────────────────────────────────────────────
+
+@app.get("/api/stores/{store_id}/plans")
+def get_plans(store_id: str):
+    _require_store(store_id)
+    return storage.list_plans(store_id)
+
+@app.post("/api/stores/{store_id}/plans", status_code=201)
+def create_plan(store_id: str, body: PlanCreate):
+    _require_store(store_id)
+    try:
+        plan = storage.create_plan(
+            store_id, body.title, body.idea,
+            body.subtasks, body.max_tokens_per_subtask,
+        )
+        # Auto-create a context document per subtask so agents can read them via MCP
+        for st in plan["subtasks"]:
+            content = _build_subtask_doc(plan, st)
+            try:
+                doc = storage.create_document(
+                    store_id,
+                    title=f"[Plan] {plan['title']} — {st['title']}",
+                    content=content,
+                    tags=["plan", "subtask", "agent-task"],
+                )
+                storage.set_subtask_doc(store_id, plan["id"], st["id"], doc["id"])
+            except ValueError:
+                pass  # token limit hit — doc not created, agent will see raw subtask via tool
+        return storage.get_plan(store_id, plan["id"])
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+
+@app.get("/api/stores/{store_id}/plans/{plan_id}")
+def get_plan(store_id: str, plan_id: str):
+    plan = storage.get_plan(store_id, plan_id)
+    if not plan:
+        raise HTTPException(404, "Plan not found")
+    return plan
+
+@app.delete("/api/stores/{store_id}/plans/{plan_id}", status_code=204)
+def delete_plan(store_id: str, plan_id: str):
+    plan = storage.get_plan(store_id, plan_id)
+    if not plan:
+        raise HTTPException(404, "Plan not found")
+    # Delete all subtask context docs
+    for st in plan.get("subtasks", []):
+        if st.get("doc_id"):
+            storage.delete_document(store_id, st["doc_id"])
+    if not storage.delete_plan(store_id, plan_id):
+        raise HTTPException(404, "Plan not found")
+
+@app.get("/api/stores/{store_id}/plans/{plan_id}/next")
+def get_next_subtask(store_id: str, plan_id: str):
+    st = storage.get_next_subtask(store_id, plan_id)
+    if not st:
+        return {"message": "No pending subtasks available.", "subtask": None}
+    return {"subtask": st}
+
+@app.post("/api/stores/{store_id}/plans/{plan_id}/subtasks/{subtask_id}/claim")
+def claim_subtask(store_id: str, plan_id: str, subtask_id: str, body: SubtaskClaim):
+    st = storage.claim_subtask(store_id, plan_id, subtask_id, body.agent_name)
+    if not st:
+        raise HTTPException(404, "Subtask not found or already claimed")
+    return st
+
+@app.post("/api/stores/{store_id}/plans/{plan_id}/subtasks/{subtask_id}/complete")
+def complete_subtask(store_id: str, plan_id: str, subtask_id: str, body: SubtaskComplete):
+    st = storage.complete_subtask(store_id, plan_id, subtask_id, body.output, body.output_summary)
+    if not st:
+        raise HTTPException(404, "Subtask not found")
+    return st
+
+@app.post("/api/stores/{store_id}/plans/{plan_id}/finalize")
+def finalize_plan(store_id: str, plan_id: str, body: PlanFinalOutput):
+    plan = storage.set_plan_final_output(store_id, plan_id, body.output)
+    if not plan:
+        raise HTTPException(404, "Plan not found")
+    return plan
+
+
+def _build_subtask_doc(plan: dict, st: dict) -> str:
+    deps = st.get("depends_on", [])
+    dep_note = ""
+    if deps:
+        dep_titles = []
+        for idx in deps:
+            dep_st = next((s for s in plan["subtasks"] if s["index"] == idx), None)
+            if dep_st:
+                dep_titles.append(f"subtask {idx}: {dep_st['title']}")
+        dep_note = f"\n**Depends on:** {', '.join(dep_titles)}\n"
+
+    return f"""# {st['title']}
+
+**Plan:** {plan['title']}  
+**Subtask {st['index'] + 1} of {len(plan['subtasks'])}**  
+**Subtask ID:** `{st['id']}`  
+**Plan ID:** `{plan['id']}`  
+{dep_note}
+## Your task
+
+{st['description']}
+
+## Context & background
+
+{st['context'] or '_No additional context provided._'}
+
+## Instructions for the agent
+
+You are working on one part of a larger plan. Your job is **only** this subtask.
+
+1. Read the task and context above carefully.
+2. Do the work for this subtask only — stay focused and don't exceed your scope.
+3. When done, call the `complete_subtask` MCP tool with:
+   - `plan_id`: `{plan['id']}`
+   - `subtask_id`: `{st['id']}`
+   - `output`: your full result / deliverable
+   - `output_summary`: a 1-2 sentence summary of what you produced (for the orchestrator)
+4. The orchestrator will combine all subtask outputs into the final result.
+
+## Overall goal (for context only)
+
+{plan['idea']}
+"""
 
 
 # ── static / GUI ──────────────────────────────────────────────────────────────
