@@ -71,6 +71,7 @@ def _new_store(name: str, description: str = "") -> dict:
         "documents": [],
         "links": [],
         "issues": [],
+        "plans": [],
     }
 
 
@@ -374,3 +375,215 @@ def delete_issue(store_id: str, issue_id: str) -> bool:
         _save(data)
         return True
     return False
+
+
+# ── plans (scoped to store) ───────────────────────────────────────────────────
+# Schema:
+#   plan: { id, title, idea, status, max_tokens_per_subtask, subtasks: [], created_at, updated_at }
+#   subtask: { id, plan_id, index, title, description, context, status,
+#              assigned_agent, output, doc_id, created_at, updated_at }
+#   plan.status: draft | active | in_progress | done
+#   subtask.status: pending | in_progress | done | blocked
+
+def list_plans(store_id: str) -> list[dict]:
+    s = get_store(store_id)
+    return s.get("plans", []) if s else []
+
+
+def get_plan(store_id: str, plan_id: str) -> Optional[dict]:
+    return next((p for p in list_plans(store_id) if p["id"] == plan_id), None)
+
+
+def create_plan(
+    store_id: str,
+    title: str,
+    idea: str,
+    subtasks: list[dict],
+    max_tokens_per_subtask: int = 1500,
+) -> dict:
+    """
+    Create a plan with pre-decomposed subtasks.
+    subtasks: list of { title, description, context, depends_on: [] }
+    """
+    data = _load()
+    store = next((s for s in data["stores"] if s["id"] == store_id), None)
+    if not store:
+        raise ValueError("Store not found.")
+    if "plans" not in store:
+        store["plans"] = []
+
+    plan_id = str(uuid.uuid4())
+    now = _now()
+
+    built_subtasks = []
+    for i, st in enumerate(subtasks):
+        built_subtasks.append({
+            "id": str(uuid.uuid4()),
+            "plan_id": plan_id,
+            "index": i,
+            "title": st.get("title", f"Subtask {i + 1}"),
+            "description": st.get("description", ""),
+            "context": st.get("context", ""),       # what the agent needs to know
+            "depends_on": st.get("depends_on", []), # list of subtask indexes
+            "status": "pending",                     # pending | in_progress | done | blocked
+            "assigned_agent": None,
+            "output": None,                          # agent writes result here
+            "output_summary": None,                  # short summary for orchestrator
+            "doc_id": None,                          # id of auto-created context doc
+            "created_at": now,
+            "updated_at": now,
+        })
+
+    plan = {
+        "id": plan_id,
+        "title": title,
+        "idea": idea,
+        "status": "active",                          # draft | active | in_progress | done
+        "max_tokens_per_subtask": max_tokens_per_subtask,
+        "subtasks": built_subtasks,
+        "final_output": None,                        # orchestrator writes synthesis here
+        "created_at": now,
+        "updated_at": now,
+    }
+    store["plans"].append(plan)
+    _save(data)
+    return plan
+
+
+def update_plan_status(store_id: str, plan_id: str, status: str) -> Optional[dict]:
+    data = _load()
+    store = next((s for s in data["stores"] if s["id"] == store_id), None)
+    if not store:
+        return None
+    for plan in store.get("plans", []):
+        if plan["id"] == plan_id:
+            plan["status"] = status
+            plan["updated_at"] = _now()
+            _save(data)
+            return plan
+    return None
+
+
+def set_plan_final_output(store_id: str, plan_id: str, output: str) -> Optional[dict]:
+    data = _load()
+    store = next((s for s in data["stores"] if s["id"] == store_id), None)
+    if not store:
+        return None
+    for plan in store.get("plans", []):
+        if plan["id"] == plan_id:
+            plan["final_output"] = output
+            plan["status"] = "done"
+            plan["updated_at"] = _now()
+            _save(data)
+            return plan
+    return None
+
+
+def get_next_subtask(store_id: str, plan_id: str) -> Optional[dict]:
+    """Return the next pending subtask whose dependencies are all done."""
+    plan = get_plan(store_id, plan_id)
+    if not plan:
+        return None
+    done_indexes = {
+        st["index"] for st in plan["subtasks"] if st["status"] == "done"
+    }
+    for st in plan["subtasks"]:
+        if st["status"] == "pending":
+            deps = set(st.get("depends_on") or [])
+            if deps.issubset(done_indexes):
+                return st
+    return None
+
+
+def claim_subtask(store_id: str, plan_id: str, subtask_id: str, agent_name: str = "agent") -> Optional[dict]:
+    """Mark a subtask as in_progress and record the agent."""
+    data = _load()
+    store = next((s for s in data["stores"] if s["id"] == store_id), None)
+    if not store:
+        return None
+    for plan in store.get("plans", []):
+        if plan["id"] == plan_id:
+            for st in plan["subtasks"]:
+                if st["id"] == subtask_id and st["status"] == "pending":
+                    st["status"] = "in_progress"
+                    st["assigned_agent"] = agent_name
+                    st["updated_at"] = _now()
+                    _sync_plan_status(plan)
+                    _save(data)
+                    return st
+    return None
+
+
+def complete_subtask(
+    store_id: str,
+    plan_id: str,
+    subtask_id: str,
+    output: str,
+    output_summary: str = "",
+) -> Optional[dict]:
+    """Mark a subtask done and store its output."""
+    data = _load()
+    store = next((s for s in data["stores"] if s["id"] == store_id), None)
+    if not store:
+        return None
+    for plan in store.get("plans", []):
+        if plan["id"] == plan_id:
+            for st in plan["subtasks"]:
+                if st["id"] == subtask_id:
+                    st["status"] = "done"
+                    st["output"] = output
+                    st["output_summary"] = output_summary or output[:300]
+                    st["updated_at"] = _now()
+                    _sync_plan_status(plan)
+                    _save(data)
+                    return st
+    return None
+
+
+def set_subtask_doc(store_id: str, plan_id: str, subtask_id: str, doc_id: str) -> bool:
+    """Record the context document id for a subtask."""
+    data = _load()
+    store = next((s for s in data["stores"] if s["id"] == store_id), None)
+    if not store:
+        return False
+    for plan in store.get("plans", []):
+        if plan["id"] == plan_id:
+            for st in plan["subtasks"]:
+                if st["id"] == subtask_id:
+                    st["doc_id"] = doc_id
+                    _save(data)
+                    return True
+    return False
+
+
+def delete_plan(store_id: str, plan_id: str) -> bool:
+    data = _load()
+    store = next((s for s in data["stores"] if s["id"] == store_id), None)
+    if not store:
+        return False
+    before = len(store.get("plans", []))
+    store["plans"] = [p for p in store.get("plans", []) if p["id"] != plan_id]
+    if len(store["plans"]) < before:
+        _save(data)
+        return True
+    return False
+
+
+def _sync_plan_status(plan: dict) -> None:
+    """Update plan.status based on subtask states (mutates in place, caller must _save)."""
+    statuses = {st["status"] for st in plan["subtasks"]}
+    if all(s == "done" for s in statuses) and statuses:
+        plan["status"] = "done"
+        # Auto-synthesise final_output from subtask outputs if not already set
+        if not plan.get("final_output"):
+            parts = []
+            for st in plan["subtasks"]:
+                if st.get("output"):
+                    parts.append(f"### {st['title']}\n{st['output'].strip()}")
+            if parts:
+                plan["final_output"] = "\n\n".join(parts)
+    elif "in_progress" in statuses or any(s == "done" for s in statuses):
+        plan["status"] = "in_progress"
+    else:
+        plan["status"] = "active"
+    plan["updated_at"] = _now()

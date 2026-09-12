@@ -6,6 +6,7 @@
   <title>self_mcp</title>
   <link rel="stylesheet" href="/static/style.css">
   <script src="https://cdn.jsdelivr.net/npm/marked@9/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.4.15/dist/purify.min.js"></script>
   <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
 </head>
 <body>
@@ -31,6 +32,10 @@
       <button class="nav-item" id="nav-setup" onclick="goSetup()">
         <i data-lucide="cpu" style="width:14px;height:14px"></i>
         <span style="flex:1">MCP Setup</span>
+      </button>
+      <button class="nav-item" id="nav-providers" onclick="navigate('/providers')">
+        <i data-lucide="key-round" style="width:14px;height:14px"></i>
+        <span style="flex:1">Providers</span>
       </button>
     </div>
     <div class="sidebar-footer">
@@ -69,7 +74,7 @@
     </div>
 
     <!-- View: Project inside -->
-    <div id="view-project" style="display:none;flex-direction:column;flex:1;overflow:hidden;">
+    <div id="view-project" style="display:none;">
       <div class="topbar">
         <div class="topbar-left">
           <div class="breadcrumb">
@@ -95,10 +100,14 @@
           <i data-lucide="circle-dot" style="width:12px;height:12px"></i> Issues
           <span class="nav-badge" id="ptab-issues-badge">0</span>
         </button>
+        <button class="project-tab" id="ptab-tasks" onclick="showProjectTab('tasks')">
+          <i data-lucide="workflow" style="width:12px;height:12px"></i> Tasks
+          <span class="nav-badge" id="ptab-tasks-badge">0</span>
+        </button>
       </div>
 
       <!-- Docs sub-view -->
-      <div id="project-view-docs" class="body-split" style="flex:1;overflow:hidden;">
+      <div id="project-view-docs" class="body-split">
         <div class="content">
           <div id="docs-grid" class="docs-grid"></div>
           <div id="docs-empty" class="empty" style="display:none">
@@ -135,7 +144,7 @@
       </div>
 
       <!-- Links sub-view -->
-      <div id="project-view-links" style="display:none;flex:1;overflow:hidden;">
+      <div id="project-view-links" style="display:none;">
         <div class="content">
           <div id="links-grid" class="links-grid"></div>
           <div id="links-empty" class="empty" style="display:none">
@@ -147,7 +156,7 @@
       </div>
 
       <!-- Issues sub-view -->
-      <div id="project-view-issues" style="display:none;flex:1;overflow:hidden;">
+      <div id="project-view-issues" style="display:none;">
         <div class="content">
           <div id="issues-list" class="issues-list"></div>
           <div id="issues-empty" class="empty" style="display:none">
@@ -157,10 +166,76 @@
           </div>
         </div>
       </div>
+
+      <div id="project-view-tasks" style="display:none">
+        <div class="content task-workspace">
+          <div class="task-intro">
+            <h2>From a goal to a reviewed draft</h2>
+            <p>A lead model plans the work, smaller workers draft independent subtasks, and the lead reviews and combines their outputs. Rejected work is revised within your limit.</p>
+            <p class="task-notice">Text and code generation only: agents cannot execute code, run VQE simulations, browse, or modify your files. Model review is not experimental verification. Only the goal and generated task context are sent; project documents are not automatically attached.</p>
+          </div>
+          <div class="task-columns">
+            <aside class="task-controls">
+              <form id="task-run-form" class="setup-card">
+                <h3>Give the team a task</h3>
+                <div class="form-field">
+                  <label for="task-goal">Goal and acceptance criteria</label>
+                  <textarea class="form-input" id="task-goal" rows="6" maxlength="12000" required placeholder="Example: Design a VQE experiment for H₂. Explain the Hamiltonian and ansatz, draft Python code, and identify tests and assumptions. Do not invent simulation results."></textarea>
+                </div>
+                <div class="form-field">
+                  <label for="task-provider">Provider</label>
+                  <select id="task-provider" class="form-input" required><option value="">Loading providers…</option></select>
+                  <p id="task-provider-status" role="status"></p>
+                  <a href="/providers" id="task-provider-settings">Manage provider access</a>
+                </div>
+                <button type="button" class="btn btn-secondary btn-sm" id="task-load-models">Load accessible models</button>
+                <p id="task-model-status" role="status" aria-live="polite">Automatic model selection runs when you start. Load models to inspect or override the recommendation.</p>
+                <div class="form-field">
+                  <label for="task-lead-model">Lead: planner, reviewer, and synthesizer</label>
+                  <select id="task-lead-model" class="form-input"><option value="">Automatic lead selection</option></select>
+                </div>
+                <div class="form-field">
+                  <label for="task-worker-model">Workers: subtask generation</label>
+                  <select id="task-worker-model" class="form-input"><option value="">Automatic smaller-model selection</option></select>
+                </div>
+                <p class="task-help">Selection uses model-family and version heuristics, not a universal “best model” or price guarantee. All roles use the selected provider. Copilot authentication is not supported in this version.</p>
+                <div class="task-limits">
+                  <div class="form-field">
+                    <label for="task-max-tasks">Maximum subtasks</label>
+                    <input id="task-max-tasks" class="form-input" type="number" min="1" max="8" value="6" required>
+                  </div>
+                  <div class="form-field">
+                    <label for="task-max-revisions">Revision rounds</label>
+                    <input id="task-max-revisions" class="form-input" type="number" min="0" max="3" value="2" required>
+                  </div>
+                </div>
+                <p class="task-help">At most two model calls run simultaneously across the server. Each run stops after 15 minutes or its revision limit. Token and call limits do not guarantee a fixed dollar cost.</p>
+                <label class="task-consent"><input type="checkbox" id="task-cost-consent" required> I understand that starting sends this goal to my provider and begins billable model calls.</label>
+                <button type="submit" class="btn btn-primary" id="task-submit" disabled>Start task</button>
+                <p id="task-submit-status" role="status" aria-live="polite"></p>
+                <div id="task-uncertain-actions" hidden>
+                  <button type="button" class="btn btn-secondary btn-sm" id="task-reconcile">Check recent runs</button>
+                  <button type="button" class="btn btn-danger btn-sm" id="task-allow-retry">Allow another submission</button>
+                </div>
+              </form>
+              <section class="setup-card task-history">
+                <div class="task-section-heading"><h3>Recent runs</h3><button type="button" class="btn btn-secondary btn-xs" id="task-history-refresh">Refresh</button></div>
+                <p class="task-help">Latest 50 runs for this project. Leaving this tab does not cancel running work.</p>
+                <p id="task-history-status" role="status" aria-live="polite"></p>
+                <div id="task-history-list"></div>
+              </section>
+            </aside>
+            <section class="task-results" aria-label="Selected task run">
+              <p id="task-run-status" role="status" aria-live="polite">Submit a goal or select a previous run to see the breakdown.</p>
+              <div id="task-run-detail"></div>
+            </section>
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- View: MCP Setup -->
-    <div id="view-setup" style="display:none">
+    <div id="view-setup" style="display:none;">
       <div class="topbar"><h1>MCP Setup</h1></div>
       <div class="content">
         <div class="setup-wrap">
@@ -221,6 +296,27 @@
             </div>
           </div>
 
+        </div>
+      </div>
+    </div>
+
+    <div id="view-providers" style="display:none">
+      <div class="topbar">
+        <h1>AI Providers</h1>
+        <button class="btn btn-secondary btn-sm" id="providers-refresh">Refresh status</button>
+      </div>
+      <div class="content">
+        <div class="setup-wrap provider-settings">
+          <p>Connect your own OpenAI or Anthropic API account. These preferences prepare model access; they do not run agents or select models by task.</p>
+          <p id="providers-status" role="status" aria-live="polite">Loading provider status…</p>
+          <div id="providers-list"></div>
+          <div class="setup-card">
+            <h2 class="setup-card-title">Credential storage</h2>
+            <p>Existing <code>OPENAI_API_KEY</code> and <code>ANTHROPIC_API_KEY</code> environment variables take precedence and skip first-time setup.</p>
+            <p>Save new keys to the OS credential store, or keep them in API-server memory until restart. Server-memory credentials are shared by local clients and are lost on reload.</p>
+            <p>Only non-secret preferences are saved in JSON. API keys are never saved in browser storage or returned by the settings API.</p>
+            <p>API access may require separate billing. ChatGPT and Claude subscriptions do not automatically include API access. Provider sign-in is not supported here yet.</p>
+          </div>
         </div>
       </div>
     </div>
@@ -391,6 +487,56 @@
 
 <div id="toast"></div>
 
+<dialog id="provider-dialog" aria-labelledby="provider-dialog-title" aria-describedby="provider-dialog-intro">
+  <form id="provider-form" autocomplete="off">
+    <div class="modal-head">
+      <h2 id="provider-dialog-title">Set up your AI provider</h2>
+      <button type="button" class="modal-close" id="provider-close" aria-label="Close provider setup">×</button>
+    </div>
+    <div class="modal-body">
+      <p id="provider-dialog-intro">Connect a provider now, or set up later. Your existing project features remain available.</p>
+      <div class="form-field">
+        <label for="provider-select">Provider</label>
+        <select class="form-input" id="provider-select">
+          <option value="openai">OpenAI</option>
+          <option value="anthropic">Anthropic</option>
+        </select>
+      </div>
+      <p id="provider-source"></p>
+      <div class="form-field" id="provider-key-field">
+        <label for="provider-key">API key</label>
+        <input class="form-input" id="provider-key" type="password" autocomplete="new-password" spellcheck="false" autocapitalize="none" maxlength="4096" aria-describedby="provider-key-help">
+        <p id="provider-key-help">Enter a new key to connect or replace credentials. Leave blank to keep an existing key.</p>
+        <a id="provider-key-link" href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer">Manage API keys at the provider</a>
+      </div>
+      <div class="form-field" id="provider-storage-field">
+        <label for="provider-storage">Store a new key in</label>
+        <select class="form-input" id="provider-storage">
+          <option value="keyring">OS credential store (persists across restarts)</option>
+          <option value="session">Server memory (until restart or reload)</option>
+        </select>
+        <p id="provider-storage-help"></p>
+      </div>
+      <button type="button" class="btn btn-secondary" id="provider-test">Test connection and load models</button>
+      <p id="provider-test-status" role="status" aria-live="polite"></p>
+      <div class="form-field">
+        <label for="provider-model">Default model identifier</label>
+        <input class="form-input" id="provider-model" list="provider-models" maxlength="200" required autocomplete="off" placeholder="Test connection to load available models">
+        <datalist id="provider-models"></datalist>
+        <p>Choose from the returned models or enter an exact identifier. Listing models verifies authentication, not inference access or task suitability.</p>
+      </div>
+      <label class="provider-default"><input type="checkbox" id="provider-default" checked> Set as default provider (otherwise keep the current default)</label>
+      <p id="provider-form-status" role="status" aria-live="polite"></p>
+    </div>
+    <div class="modal-foot">
+      <button type="button" class="btn btn-secondary" id="provider-skip">Set up later</button>
+      <button type="submit" class="btn btn-primary" id="provider-save">Save and continue</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="/static/providers.js"></script>
+<script src="/static/tasks.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

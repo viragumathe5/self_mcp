@@ -61,13 +61,13 @@ for port in (8000, 8001):
 import time; time.sleep(0.5)  # brief wait for OS to release ports
 
 print("[self_mcp] Starting API server  → http://localhost:8000")
-print("[self_mcp] Starting MCP server  → http://localhost:8001/sse")
+print("[self_mcp] Starting MCP server  → http://localhost:8001/<slug>/sse")
 print("[self_mcp] GUI                  → http://localhost:8000")
 print("[self_mcp] Press Ctrl+C to stop\n")
 
 api = subprocess.Popen(
     [PYTHON, "-m", "uvicorn", "api:app",
-     "--host", "0.0.0.0", "--port", "8000", "--reload"],
+     "--host", "127.0.0.1", "--port", "8000", "--reload"],
     cwd=SRC,
 )
 mcp = subprocess.Popen(

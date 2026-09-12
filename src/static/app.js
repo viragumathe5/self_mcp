@@ -1,6 +1,6 @@
 // ── Config ──────────────────────────────────────────────────────────────────
 const TOKEN_LIMIT = 2000;
-marked.setOptions({ breaks: true, gfm: true });
+if (window.marked) marked.setOptions({ breaks: true, gfm: true });
 
 // ── State ───────────────────────────────────────────────────────────────────
 let _currentProject    = null;
@@ -8,6 +8,8 @@ let _currentProjectTab = 'docs';
 let _dirty             = false;
 let _setupProjects     = [];
 let _configFormat      = 'opencode';
+let _routeGeneration   = 0;
+const UUID_RE          = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 // ── Icons ───────────────────────────────────────────────────────────────────
 function initIcons() { if (window.lucide) lucide.createIcons(); }
@@ -16,6 +18,18 @@ function initIcons() { if (window.lucide) lucide.createIcons(); }
 const esc = s => String(s)
   .replace(/&/g,'&amp;').replace(/</g,'&lt;')
   .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+
+// Escape data for both the JavaScript string and its HTML attribute context.
+const inlineArg = value => esc(JSON.stringify(String(value)));
+
+function safeLinkUrl(value) {
+  try {
+    const url = new URL(value);
+    return ['http:', 'https:'].includes(url.protocol) ? url.href : '#';
+  } catch {
+    return '#';
+  }
+}
 
 const countTokens = t => t ? Math.max(1, Math.floor(t.length / 4)) : 0;
 const tokClass    = n => n > TOKEN_LIMIT ? 'tok-over' : n > TOKEN_LIMIT * .8 ? 'tok-warn' : 'tok-ok';
@@ -66,9 +80,20 @@ function navigate(path, pushState = true) {
 }
 
 async function _route(path) {
+  const routeGeneration = ++_routeGeneration;
+  window.TasksUI.hide();
   // Close any open modal
   document.getElementById('project-modal').classList.remove('open');
   document.getElementById('link-modal').classList.remove('open');
+  document.getElementById('issue-modal').classList.remove('open');
+  window.ProvidersUI.close();
+
+  if (path === '/providers') {
+    document.getElementById('doc-page').classList.remove('open');
+    _showView('providers');
+    window.ProvidersUI.refresh();
+    return;
+  }
 
   // /setup
   if (path === '/setup') {
@@ -82,21 +107,19 @@ async function _route(path) {
   const newMatch = path.match(/^\/projects\/([^/]+)\/new$/);
 
   if (docMatch || newMatch) {
-    const projectId = (docMatch || newMatch)[1];
-    if (!_currentProject || _currentProject.id !== projectId) {
-      const project = await apiFetch(`/api/stores/${projectId}`);
-      if (!project) { navigate('/'); return; }
-      _currentProject = project;
-      document.getElementById('project-breadcrumb-name').textContent = project.name;
-    }
+    const projectRef = decodeURIComponent((docMatch || newMatch)[1]);
+    const project = await ensureCurrentProject(projectRef, routeGeneration);
+    if (routeGeneration !== _routeGeneration) return;
+    if (!project) { navigate('/'); return; }
     _showView('project');
     showProjectTab('docs', false);
     if (newMatch) {
       _openEditorNew();
     } else {
       const docId = docMatch[2];
-      const doc = await apiFetch(`/api/stores/${projectId}/documents/${docId}`);
-      if (!doc) { navigate(`/projects/${projectId}`); return; }
+      const doc = await apiFetch(`/api/stores/${project.id}/documents/${docId}`);
+      if (routeGeneration !== _routeGeneration) return;
+      if (!doc) { navigate(`/projects/${project.id}`); return; }
       _openEditorDoc(doc);
     }
     return;
@@ -105,38 +128,57 @@ async function _route(path) {
   // /projects/<projectId>/links
   const linksMatch = path.match(/^\/projects\/([^/]+)\/links$/);
   if (linksMatch) {
-    const projectId = linksMatch[1];
-    if (!_currentProject || _currentProject.id !== projectId) {
-      const project = await apiFetch(`/api/stores/${projectId}`);
-      if (!project) { navigate('/'); return; }
-      _currentProject = project;
-      document.getElementById('project-breadcrumb-name').textContent = project.name;
-    }
+    const projectRef = decodeURIComponent(linksMatch[1]);
+    const project = await ensureCurrentProject(projectRef, routeGeneration);
+    if (routeGeneration !== _routeGeneration) return;
+    if (!project) { navigate('/'); return; }
     _showView('project');
     showProjectTab('links', false);
+    return;
+  }
+
+  const tasksMatch = path.match(/^\/projects\/([^/]+)\/tasks\/?$/);
+  if (tasksMatch) {
+    const project = await ensureCurrentProject(decodeURIComponent(tasksMatch[1]), routeGeneration);
+    if (routeGeneration !== _routeGeneration) return;
+    if (!project) { navigate('/'); return; }
+    document.getElementById('doc-page').classList.remove('open');
+    _showView('project');
+    showProjectTab('tasks', false);
     return;
   }
 
   // /projects/<projectId>/issues
   const issuesMatch = path.match(/^\/projects\/([^/]+)\/issues$/);
   if (issuesMatch) {
-    const projectId = issuesMatch[1];
-    if (!_currentProject || _currentProject.id !== projectId) {
-      const project = await apiFetch(`/api/stores/${projectId}`);
-      if (!project) { navigate('/'); return; }
-      _currentProject = project;
-      document.getElementById('project-breadcrumb-name').textContent = project.name;
-    }
+    const projectRef = decodeURIComponent(issuesMatch[1]);
+    const project = await ensureCurrentProject(projectRef, routeGeneration);
+    if (routeGeneration !== _routeGeneration) return;
+    if (!project) { navigate('/'); return; }
     _showView('project');
     showProjectTab('issues', false);
+    return;
+  }
+
+  // /projects/<projectId>/plans (legacy route) → docs tab
+  const plansMatch = path.match(/^\/projects\/([^/]+)\/plans$/);
+  if (plansMatch) {
+    const projectRef = decodeURIComponent(plansMatch[1]);
+    const project = await ensureCurrentProject(projectRef, routeGeneration);
+    if (routeGeneration !== _routeGeneration) return;
+    if (!project) { navigate('/'); return; }
+    _showView('project');
+    showProjectTab('docs', false);
+    history.replaceState({ path: `/projects/${project.id}` }, '', `/projects/${project.id}`);
     return;
   }
 
   // /projects/<projectId>
   const projectMatch = path.match(/^\/projects\/([^/]+)$/);
   if (projectMatch) {
-    const projectId = projectMatch[1];
-    const project = await apiFetch(`/api/stores/${projectId}`);
+    const projectRef = decodeURIComponent(projectMatch[1]);
+    const project = await ensureCurrentProject(projectRef, routeGeneration);
+    if (routeGeneration !== _routeGeneration) return;
     if (!project) { navigate('/'); return; }
     _currentProject = project;
     document.getElementById('project-breadcrumb-name').textContent = project.name;
@@ -150,6 +192,27 @@ async function _route(path) {
   document.getElementById('doc-page').classList.remove('open');
   _showView('projects');
   loadProjects();
+}
+
+async function ensureCurrentProject(projectRef, routeGeneration = _routeGeneration) {
+  if (_currentProject && (_currentProject.id === projectRef || _currentProject.slug === projectRef)) {
+    return _currentProject;
+  }
+  let project = null;
+  if (UUID_RE.test(projectRef)) {
+    project = await apiFetch(`/api/stores/${projectRef}`, { silent: true });
+  }
+  if (!project) {
+    const stores = await apiFetch('/api/stores', { silent: true });
+    if (Array.isArray(stores)) {
+      project = stores.find(s => s.slug === projectRef || s.id === projectRef) || null;
+    }
+  }
+  if (!project) return null;
+  if (routeGeneration !== _routeGeneration) return null;
+  _currentProject = project;
+  document.getElementById('project-breadcrumb-name').textContent = project.name;
+  return project;
 }
 
 // ── popstate — browser back/forward ─────────────────────────────────────────
@@ -168,13 +231,20 @@ window.addEventListener('popstate', e => {
 
 // ── View switcher ────────────────────────────────────────────────────────────
 function _showView(name) {
-  ['projects','project','setup'].forEach(v => {
+  ['projects','project','setup','providers'].forEach(v => {
     const el = document.getElementById('view-' + v);
     if (!el) return;
-    el.style.display = v === name ? (v === 'project' ? 'flex' : '') : 'none';
+    // CSS defines the correct display (flex) for each view.
+    // We only ever set display:none to hide; removing it lets CSS take over.
+    if (v === name) {
+      el.style.removeProperty('display');
+    } else {
+      el.style.display = 'none';
+    }
   });
   document.getElementById('nav-projects').classList.toggle('active', name === 'projects' || name === 'project');
   document.getElementById('nav-setup').classList.toggle('active', name === 'setup');
+  document.getElementById('nav-providers').classList.toggle('active', name === 'providers');
   initIcons();
 }
 
@@ -198,7 +268,7 @@ async function loadProjects() {
       <div class="project-card-header">
         <div class="project-icon"><i data-lucide="archive" style="width:15px;height:15px"></i></div>
         <div class="project-card-actions" onclick="event.stopPropagation()">
-          <button class="btn btn-ghost btn-xs" onclick="editProject('${s.id}','${esc(s.name)}','${esc(s.description||'')}')" title="Edit">
+          <button class="btn btn-ghost btn-xs" onclick="editProject('${s.id}',${inlineArg(s.name)},${inlineArg(s.description||'')})" title="Edit">
             <i data-lucide="pencil" style="width:11px;height:11px"></i>
           </button>
           <button class="btn btn-danger btn-xs" onclick="deleteProject('${s.id}')" title="Delete">
@@ -218,7 +288,7 @@ async function loadProjects() {
       </div>
       <div class="project-footer">
         <span class="project-sse"><i data-lucide="radio" style="width:10px;height:10px"></i>localhost:8001/${esc(s.slug)}/sse</span>
-        <button class="btn btn-ghost btn-xs" onclick="event.stopPropagation();copyProjectConfig('${esc(s.slug)}','${esc(s.name)}')" title="Copy config">
+        <button class="btn btn-ghost btn-xs" onclick="event.stopPropagation();copyProjectConfig(${inlineArg(s.slug)},${inlineArg(s.name)})" title="Copy config">
           <i data-lucide="clipboard-copy" style="width:11px;height:11px"></i>
         </button>
       </div>
@@ -228,17 +298,28 @@ async function loadProjects() {
 
 // ── Project tabs ──────────────────────────────────────────────────────────────
 function showProjectTab(tab, pushHistory = true) {
+  if (pushHistory) _routeGeneration += 1;
+  if (tab !== 'tasks') window.TasksUI.hide();
   _currentProjectTab = tab;
-  ['docs','links','issues'].forEach(t => {
+  ['docs','links','issues','tasks'].forEach(t => {
     document.getElementById('ptab-' + t).classList.toggle('active', t === tab);
     const el = document.getElementById('project-view-' + t);
-    if (el) el.style.display = t === tab ? (t === 'docs' ? 'flex' : 'block') : 'none';
+    if (!el) return;
+    // CSS defines the correct flex layout for each sub-view.
+    // Only set display:none to hide; remove it to let CSS restore flex.
+    if (t === tab) {
+      el.style.removeProperty('display');
+    } else {
+      el.style.display = 'none';
+    }
   });
   const acts = document.getElementById('project-topbar-actions');
   if (tab === 'docs') {
     acts.innerHTML = `<button class="btn btn-primary btn-sm" onclick="newDoc()"><i data-lucide="plus" style="width:13px;height:13px"></i> New Document</button>`;
   } else if (tab === 'links') {
     acts.innerHTML = `<button class="btn btn-primary btn-sm" onclick="openLinkModal()"><i data-lucide="plus" style="width:13px;height:13px"></i> Save Link</button>`;
+  } else if (tab === 'tasks') {
+    acts.innerHTML = `<button class="btn btn-primary btn-sm" onclick="TasksUI.focusGoal()">New task</button>`;
   } else {
     acts.innerHTML = `<button class="btn btn-primary btn-sm" onclick="openIssueModal()"><i data-lucide="plus" style="width:13px;height:13px"></i> New Issue</button>`;
   }
@@ -251,6 +332,7 @@ function showProjectTab(tab, pushHistory = true) {
   if (tab === 'docs')   loadDocs();
   if (tab === 'links')  loadLinks();
   if (tab === 'issues') loadIssues();
+  if (tab === 'tasks' && _currentProject) window.TasksUI.show(_currentProject);
 }
 
 // ── Docs ──────────────────────────────────────────────────────────────────────
@@ -375,8 +457,19 @@ function markDirty()     { _dirty = true; document.getElementById('dirty-pill').
 function onEditorInput() { markDirty(); updateTokenBar(); renderPreview(); }
 
 function renderPreview() {
-  document.getElementById('md-preview').innerHTML =
-    marked.parse(document.getElementById('editor').value || '');
+  const preview = document.getElementById('md-preview');
+  const content = document.getElementById('editor').value || '';
+  // Fail closed if a CDN is unavailable; project content must not execute scripts.
+  if (!window.marked || !window.DOMPurify) {
+    preview.textContent = content;
+    return;
+  }
+  preview.innerHTML = DOMPurify.sanitize(marked.parse(content), {
+    USE_PROFILES: { html: true },
+    FORBID_TAGS: ['style', 'form', 'input', 'button', 'textarea', 'select'],
+    FORBID_ATTR: ['style'],
+    SANITIZE_NAMED_PROPS: true,
+  });
 }
 
 function updateTokenBar() {
@@ -458,7 +551,7 @@ async function loadLinks() {
   grid.innerHTML = links.map(l => `
     <div class="link-card">
       <div class="link-card-title">${esc(l.title)}</div>
-      <div class="link-card-url"><a href="${esc(l.url)}" target="_blank">${esc(l.url)}</a></div>
+      <div class="link-card-url"><a href="${esc(safeLinkUrl(l.url))}" target="_blank" rel="noopener noreferrer">${esc(l.url)}</a></div>
       ${l.description ? `<div class="link-card-desc">${esc(l.description)}</div>` : ''}
       <div class="link-card-footer">
         <div style="display:flex;gap:4px;flex-wrap:wrap">${l.tags.map(t => `<span class="tag">${esc(t)}</span>`).join('')}</div>
@@ -551,10 +644,10 @@ async function loadSetup() {
           <code style="font-family:var(--mono);font-size:10px;color:var(--text3)">localhost:8001/${esc(s.slug)}/sse</code>
         </div>
         <div style="display:flex;gap:5px;flex-shrink:0">
-          <button class="btn btn-secondary btn-xs" onclick="copy('http://localhost:8001/${esc(s.slug)}/sse','SSE URL copied')">
+          <button class="btn btn-secondary btn-xs" onclick="copy(${inlineArg(`http://localhost:8001/${s.slug}/sse`)},'SSE URL copied')">
             <i data-lucide="link" style="width:10px;height:10px"></i> URL
           </button>
-          <button class="btn btn-secondary btn-xs" onclick="copyProjectConfig('${esc(s.slug)}','${esc(s.name)}')">
+          <button class="btn btn-secondary btn-xs" onclick="copyProjectConfig(${inlineArg(s.slug)},${inlineArg(s.name)})">
             <i data-lucide="clipboard-copy" style="width:10px;height:10px"></i> Config
           </button>
         </div>
@@ -649,11 +742,11 @@ function renderIssueCard(issue) {
       <div class="issue-card-header">
         <div class="issue-status-badge ${statusCls}">
           <i data-lucide="${isDone ? 'check-circle-2' : issue.status === 'in_progress' ? 'loader-2' : 'circle-dot'}" style="width:12px;height:12px"></i>
-          ${STATUS_LABEL[issue.status] || issue.status}
+          ${esc(STATUS_LABEL[issue.status] || issue.status)}
         </div>
         <div class="issue-priority-badge ${priorityCls}">
           <i data-lucide="${issue.priority === 'high' ? 'chevrons-up' : issue.priority === 'low' ? 'chevrons-down' : 'minus'}" style="width:11px;height:11px"></i>
-          ${PRIORITY_LABEL[issue.priority] || issue.priority}
+          ${esc(PRIORITY_LABEL[issue.priority] || issue.priority)}
         </div>
         <div style="flex:1"></div>
         <div class="issue-card-actions">
@@ -809,12 +902,14 @@ async function apiFetch(url, opts = {}) {
     if (!res.ok) {
       let msg = `Error ${res.status}`;
       try { const e = await res.json(); msg = e.detail || msg; } catch {}
-      toast(msg, 'error'); return null;
+      if (!opts.silent) toast(msg, 'error');
+      return null;
     }
     if (opts.noBody) return true;
     return await res.json();
   } catch {
-    toast('Network error — is the server running?', 'error'); return null;
+    if (!opts.silent) toast('Network error — is the server running?', 'error');
+    return null;
   }
 }
 
@@ -840,4 +935,5 @@ document.addEventListener('keydown', e => {
   const _initPath = window.location.pathname;
   history.replaceState({ path: _initPath }, '', _initPath);
   _route(_initPath);
+  window.ProvidersUI.init();
 })();
