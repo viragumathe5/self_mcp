@@ -79,6 +79,7 @@ class ModelTests(unittest.TestCase):
     def test_strict_inputs(self):
         for override in ({"max_tasks": 9}, {"max_tasks": 0}, {"max_tasks": True}, {"max_tasks": "6"},
                          {"max_revisions": 4}, {"max_revisions": -1}, {"provider": "copilot"},
+                         {"schema_retries": 3}, {"schema_retries": True}, {"include_project_context": "true"},
                          {"api_key": SECRET}, {"goal": " "}, {"goal": "a" * 12001}):
             with self.subTest(override=override), self.assertRaises(ValueError):
                 models.RunInput.model_validate({"provider": "openai", "goal": "Draft", **override})
@@ -106,8 +107,40 @@ class ModelTests(unittest.TestCase):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 models.validate_review(json.dumps(invalid), {"a"})
 
+    def test_unapproved_synthesis_is_only_allowed_for_the_final_review(self):
+        value = {**review(False, ["a"]), "final_output": "Best available draft"}
+        with self.assertRaises(ValueError):
+            models.validate_review(json.dumps(value), {"a"})
+        parsed = models.validate_review(json.dumps(value), {"a"}, allow_unapproved_output=True)
+        self.assertFalse(parsed.approved)
+        self.assertEqual(parsed.final_output, value["final_output"])
+
+    def test_review_requires_complete_consistent_task_assessments(self):
+        good = {**review(), "task_reviews": [{"task_id": "a", "verdict": "keep", "reason": "Meets the requested criterion", "change": None}]}
+        models.validate_review(json.dumps(good), {"a"}, require_assessments=True)
+        bad = [review(), {**good, "task_reviews": good["task_reviews"] * 2},
+               {**good, "task_reviews": [{**good["task_reviews"][0], "task_id": "missing"}]},
+               {**good, "task_reviews": [{**good["task_reviews"][0], "verdict": "revise"}]},
+               {**good, "task_reviews": [{**good["task_reviews"][0], "change": "Rewrite everything"}]}]
+        for value in bad:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                models.validate_review(json.dumps(value), {"a"}, require_assessments=True)
+
+    def test_revision_must_reference_an_existing_criterion_and_evidence(self):
+        assessment = {"task_id": "a", "verdict": "revise", "reason": "Assumptions missing",
+                      "change": "Describe the input assumptions", "criterion_index": 1,
+                      "evidence": "The draft specifies no input assumptions; its input domain is unclear."}
+        value = {**review(False, ["a"]), "task_reviews": [assessment]}
+        parsed = models.validate_review(json.dumps(value), {"a"}, require_assessments=True,
+                                        task_criteria={"a": ["Explain assumptions."]})
+        self.assertEqual(parsed.task_reviews[0].criterion_index, 1)
+        for override in ({"criterion_index": None}, {"criterion_index": 2}, {"evidence": None}, {"evidence": " "}):
+            with self.subTest(override=override), self.assertRaises(ValueError):
+                models.validate_review(json.dumps({**value, "task_reviews": [{**assessment, **override}]}),
+                                       {"a"}, require_assessments=True, task_criteria={"a": ["Explain assumptions."]})
+
     def test_input_budgets_without_tokenizer_network(self):
-        with patch.object(models.tiktoken, "get_encoding") as encoding:
+        with patch.object(models.tokenization, "get_encoding") as encoding:
             encoding.return_value.encode.return_value = [0]
             self.assertEqual(json.loads(models.request_input("draft", {"goal": "x"})), {"goal": "x"})
             with self.assertRaises(models.InferenceError):
@@ -235,7 +268,13 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         if instructions == task_runner.PLANNER:
             text = json.dumps(self.plan)
         elif instructions == task_runner.REVIEWER:
-            text = json.dumps(self.reviews.pop(0))
+            value = deepcopy(self.reviews.pop(0))
+            value.setdefault("task_reviews", [{"task_id": t["id"], "verdict": "revise" if t["id"] in value["revision_tasks"] else "keep",
+                "reason": "Check acceptance criteria", "preserve": ["Keep useful work"],
+                "change": "Clarify the assumptions" if t["id"] in value["revision_tasks"] else None,
+                "criterion_index": 1 if t["id"] in value["revision_tasks"] else None,
+                "evidence": "Input assumptions are missing from the draft." if t["id"] in value["revision_tasks"] else None} for t in payload["tasks"]])
+            text = json.dumps(value)
         else:
             text = "Output " + payload["task"]["id"]
         return {"text": text, "input_tokens": 10, "output_tokens": 5}
@@ -252,6 +291,18 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(asyncio.shield(job), 5)
         return self.runner.store.get(STORE_ID, run["id"])
 
+    async def test_first_run_after_key_only_onboarding(self):
+        self.settings._sessions.clear()
+        response = await self.client.put("/api/providers/openai", json={"api_key": SECRET, "storage": "session"})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertFalse(self.gateway.called, "Saving a key must not make paid calls")
+        self.assertEqual(self.settings.routing()["providers"], [])
+        run = await self.wait(await self.submit())
+        self.assertEqual(run["status"], "completed", run)
+        self.assertTrue(run["final_output"])
+        self.assertFalse(run["lead_model_pinned"])
+        self.assertFalse(run["worker_model_pinned"])
+
     async def test_success_contract_usage_and_session_credentials(self):
         run = await self.wait(await self.submit())
         self.assertEqual(run["status"], "completed", run)
@@ -260,9 +311,80 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(run["tasks"][0]["attempts"], 1)
         self.assertTrue(run["final_output"].endswith(models.LIMITATION))
         self.assertEqual((await self.client.get(self.url + "/" + run["id"])).json(), run)
-        self.assertEqual((await self.client.get(self.url)).json(), {"runs": [run]})
+        self.assertEqual((await self.client.get(self.url)).json(), {"runs": [run], "next_offset": None})
         self.assertNotIn(SECRET, self.runner.store.path.read_text())
         self.assertNotIn("api_key", self.runner.store.path.read_text())
+
+    async def test_generated_results_are_immediately_searchable_as_mcp_knowledge(self):
+        import mcp_knowledge
+        run = await self.wait(await self.submit())
+        calls = self.gateway.await_count
+        original = self.runner.store.path.read_bytes()
+        with patch.object(mcp_knowledge, 'store', self.runner.store):
+            results = mcp_knowledge.call(STORE_ID, 'list_task_results', {'run_id': run['id']})
+            self.assertEqual({r['kind'] for r in results['results']}, {'final_answer', 'worker_draft', 'review_notes'})
+            final = next(r for r in results['results'] if r['kind'] == 'final_answer')
+            self.assertEqual(final['review_status'], 'approved')
+            self.assertEqual(mcp_knowledge.call(STORE_ID, 'get_task_result', {'result_id': final['result_id']})['content'], run['final_output'])
+            found = mcp_knowledge.call(STORE_ID, 'search_task_results', {'query': 'Output a'})
+            self.assertEqual(found['results'][0]['kind'], 'worker_draft')
+        self.assertEqual(self.gateway.await_count, calls)
+        self.assertEqual(self.runner.store.path.read_bytes(), original)
+
+    async def test_usage_cost_and_project_totals_include_actual_model_calls(self):
+        run = await self.wait(await self.submit())
+        url = self.url + '/' + run['id'] + '/usage'
+        usage = (await self.client.get(url)).json()
+        self.assertEqual(usage['total']['input_tokens'], 30)
+        self.assertEqual(usage['total']['model_calls'], 3)
+        self.assertIsNone(usage['total']['estimated_cost_usd'])
+        self.assertEqual({c['stage'] for c in usage['calls']}, {'plan', 'worker', 'review'})
+        for model, input_rate, output_rate in [('gpt-5', 10, 20), ('gpt-5-mini', 1, 2)]:
+            response = await self.client.put(self.url + '/pricing', json={'provider': 'openai', 'model': model,
+                'input_per_million': input_rate, 'output_per_million': output_rate})
+            self.assertEqual(response.status_code, 200, response.text)
+        usage = (await self.client.get(url)).json()
+        self.assertAlmostEqual(usage['total']['estimated_cost_usd'], .00042)
+        self.assertEqual(usage['total']['unpriced_calls'], 0)
+        self.assertEqual(usage['project_total'], usage['total'])
+        self.assertNotIn(SECRET, json.dumps(usage))
+        response = await self.client.put(self.url + '/pricing', json={'provider': 'openai', 'model': 'gpt-5',
+            'input_per_million': -1, 'output_per_million': 1})
+        self.assertEqual(response.status_code, 422)
+        other = f'/api/stores/{OTHER_STORE}/task-runs/{run["id"]}/usage'
+        self.assertEqual((await self.client.get(other)).status_code, 404)
+
+    async def test_task_listing_paginates_without_dropping_saved_runs(self):
+        first = await self.wait(await self.submit())
+        self.reviews = [review()]
+        second = await self.wait(await self.submit())
+        page = (await self.client.get(self.url + '?limit=1')).json()
+        self.assertEqual(page['next_offset'], 1)
+        older = (await self.client.get(self.url + '?limit=1&offset=1')).json()
+        self.assertIsNone(older['next_offset'])
+        self.assertEqual({page['runs'][0]['id'], older['runs'][0]['id']}, {first['id'], second['id']})
+
+    async def test_long_synthesis_with_optional_suggestions_is_delivered_without_revision(self):
+        answer = "Useful code draft.\n" * 2000
+        self.reviews = [{**review(), "final_output": answer, "suggestions": ["Optionally improve naming."]}]
+        run = await self.wait(await self.submit())
+        self.assertEqual(run["status"], "completed", run.get("error"))
+        self.assertTrue(run["final_output"].startswith(answer.rstrip()))
+        self.assertEqual(run["revision_count"], 0)
+        self.assertEqual(run["tasks"][0]["attempts"], 1)
+        self.assertEqual(run["reviews"][0]["suggestions"], ["Optionally improve naming."])
+
+    async def test_ungrounded_review_preserves_drafts_without_rerunning_workers(self):
+        self.reviews = [{**review(False, ["a"]), "task_reviews": [{"task_id": "a", "verdict": "revise",
+            "reason": "Prefer another approach", "change": "Rewrite it", "criterion_index": 2,
+            "evidence": "I prefer another style"}]}]
+        run = await self.wait(await self.submit(schema_retries=0))
+        self.assertEqual(run["status"], "failed")
+        self.assertEqual(run["stopped_stage"], "reviewing")
+        self.assertEqual(run["tasks"][0]["output"], "Output a")
+        self.assertEqual(run["tasks"][0]["attempts"], 1)
+        self.assertIn("saved worker drafts", run["error_action"])
+        self.assertEqual(self.gateway.await_count, 3)
 
     async def test_dag_workers_use_completed_dependency_outputs(self):
         self.plan["tasks"] = [planned("c", ["b"]), planned("b", ["a"]), planned("a")]
@@ -284,15 +406,91 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({p["task"]["id"] for p in revised}, {"a", "b", "c"})
         self.assertTrue(all(p["previous_output"] for p in revised))
 
+    async def test_revisions_preserve_versions_and_route_specific_feedback(self):
+        self.plan["tasks"] = [planned("a"), planned("b", ["a"]), planned("c")]
+        self.reviews = [{**review(False, ["a"]), "decisions": ["Keep the JSON interface"], "task_reviews": [
+            {"task_id": "a", "verdict": "revise", "reason": "Missing boundary case", "preserve": ["Keep JSON fields"], "change": "Handle an empty list",
+             "criterion_index": 1, "evidence": "Assumptions about empty inputs are missing."},
+            {"task_id": "b", "verdict": "keep", "reason": "Meets criteria", "change": None},
+            {"task_id": "c", "verdict": "keep", "reason": "Meets criteria", "change": None},
+        ]}, review()]
+        async def distinct(*args):
+            result = await self.infer(*args)
+            if args[-2] == task_runner.WORKER:
+                result["text"] += " revised" if args[-1]["review_feedback"] else " original"
+            return result
+        self.gateway.side_effect = distinct
+        run = await self.wait(await self.submit())
+        self.assertEqual(run["status"], "completed", run.get("error"))
+        tasks = {t["id"]: t for t in run["tasks"]}
+        self.assertEqual([v["output"] for v in tasks["a"]["output_versions"]], ["Output a original", "Output a revised"])
+        self.assertEqual(len(tasks["c"]["output_versions"]), 1)
+        self.assertEqual(run["reviews"][0]["output_versions"], {"a": 1, "b": 1, "c": 1})
+        revised = {p["task"]["id"]: p for _, stage, p in self.requests if stage == task_runner.WORKER and p["review_feedback"]}
+        self.assertEqual(revised["a"]["review_feedback"]["change"], "Handle an empty list")
+        self.assertIn("dependency", revised["b"]["review_feedback"]["reason"])
+        self.assertEqual(revised["b"]["dependencies"]["a"], "Output a revised")
+        self.assertEqual(revised["a"]["collaboration_memory"]["decisions"][0]["decision"], "Keep the JSON interface")
+        self.assertEqual(TaskStore(self.runner.store.path).get(STORE_ID, run["id"])["tasks"], run["tasks"])
+        reviewer_inputs = [p for _, stage, p in self.requests if stage == task_runner.REVIEWER]
+        self.assertNotIn("output_versions", reviewer_inputs[-1]["tasks"][0], "Do not resend every full draft version")
+
+    async def test_missing_task_assessments_fail_boundedly_without_losing_drafts(self):
+        async def missing(*args):
+            result = await self.infer(*args) if args[-2] != task_runner.REVIEWER else {"text": json.dumps(review()), "input_tokens": 10, "output_tokens": 5}
+            return result
+        self.gateway.side_effect = missing
+        run = await self.wait(await self.submit(schema_retries=1))
+        self.assertEqual(run["status"], "failed")
+        self.assertIn("assess every task", run["error"])
+        self.assertEqual(run["tasks"][0]["output_versions"][0]["output"], "Output a")
+        self.assertEqual(run["usage"]["model_calls"], 4)
+
+    async def test_memory_and_version_content_are_redacted(self):
+        self.reviews = [{**review(), "decisions": ["Never store " + SECRET]}]
+        async def echo(*args):
+            result = await self.infer(*args)
+            if args[-2] == task_runner.WORKER:
+                result["text"] = "draft " + SECRET
+            return result
+        self.gateway.side_effect = echo
+        run = await self.wait(await self.submit())
+        self.assertEqual(run["status"], "completed")
+        self.assertNotIn(SECRET, self.runner.store.path.read_text())
+        self.assertIn("[REDACTED]", run["tasks"][0]["output_versions"][0]["output"])
+        self.assertIn("[REDACTED]", run["reviews"][0]["decisions"][0])
+
     async def test_maximum_rounds_and_37_call_cap(self):
         self.plan["tasks"] = [planned(str(n)) for n in range(8)]
         self.reviews = [review(False, [str(n) for n in range(8)]) for _ in range(4)]
         run = await self.wait(await self.submit(max_tasks=8, max_revisions=3))
-        self.assertEqual(run["status"], "failed")
+        self.assertEqual(run["status"], "completed")
+        self.assertFalse(run["review_approved"])
+        self.assertEqual(run["completion_reason"], "revision_limit")
+        self.assertIn("Draft — needs review", run["final_output"])
+        self.assertEqual(run["final_output_source"], "worker_drafts")
+        self.assertTrue(all(t["output"] in run["final_output"] for t in run["tasks"]))
         self.assertEqual(run["usage"]["model_calls"], 37)
         self.assertEqual(run["revision_count"], 3)
         self.assertEqual(len(run["reviews"]), 4)
         self.assertTrue(all(t["attempts"] == 4 and t["output"] for t in run["tasks"]))
+
+    async def test_last_review_delivers_unapproved_synthesis_without_extra_calls(self):
+        self.reviews = [review(False, ["a"]), {**review(False, ["a"]), "final_output": "Usable combined implementation"}]
+        run = await self.wait(await self.submit(max_revisions=1))
+        self.assertEqual(run["status"], "completed")
+        self.assertFalse(run["review_approved"])
+        self.assertIsNone(run["error"])
+        self.assertEqual(run["final_output_source"], "reviewer")
+        self.assertIn("Usable combined implementation", run["final_output"])
+        self.assertIn("Unresolved review notes", run["final_output"])
+        self.assertEqual(run["usage"]["model_calls"], 5)
+        reviews = [p for _, stage, p in self.requests if stage == task_runner.REVIEWER]
+        self.assertEqual([p["final_review"] for p in reviews], [False, True])
+        self.assertEqual([p["remaining_revisions"] for p in reviews], [1, 0])
+        restored = TaskStore(self.runner.store.path).get(STORE_ID, run["id"])
+        self.assertEqual(restored["final_output"], run["final_output"])
+        self.assertFalse(restored["reviews"][-1]["approved"])
 
     async def test_explicit_call_cap_and_zero_revisions(self):
         with patch.object(task_runner, "CALL_LIMIT", 1):
@@ -302,7 +500,10 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(run["usage"]["model_calls"], 1)
         self.reviews = [review(False, ["a"])]
         run = await self.wait(await self.submit(max_revisions=0))
-        self.assertEqual(run["status"], "failed")
+        self.assertEqual(run["status"], "completed")
+        self.assertFalse(run["review_approved"])
+        self.assertIn("Output a", run["final_output"])
+        self.assertIn("Clarify the assumptions", run["final_output"])
         self.assertEqual(run["revision_count"], 0)
         self.assertEqual(run["tasks"][0]["output"], "Output a")
 
@@ -318,6 +519,108 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(run["status"], "failed")
         self.assertIn("invalid review", run["error"])
         self.assertEqual(run["usage"]["model_calls"], 3)
+
+    async def test_mcp_submission_reuses_api_owned_runner_and_credentials(self):
+        import mcp_tasks
+        bridge_client = httpx.AsyncClient(transport=httpx.ASGITransport(app=self.app, client=("127.0.0.1", 1234)), base_url="http://localhost:8000")
+        with patch.object(mcp_tasks.httpx, "AsyncClient", return_value=bridge_client):
+            result = await mcp_tasks.call_task_tool(STORE_ID, "start_task_run", {"goal": "Draft via MCP", "provider": "openai"})
+        self.assertFalse(result.isError, result)
+        submitted = json.loads(result.content[0].text)
+        run = await self.wait(submitted)
+        self.assertEqual(run["status"], "completed", run)
+        self.assertEqual(run["usage"]["model_calls"], 3)
+        self.assertEqual((await self.client.get(self.url + "/" + run["id"])).json(), run)
+
+    async def test_schema_correction_then_success_and_bounded_exhaustion(self):
+        original = self.infer
+        attempts = 0
+        async def inference(provider, credential, model, instructions, payload):
+            nonlocal attempts
+            if instructions == task_runner.PLANNER:
+                attempts += 1
+                if attempts == 1:
+                    return {"text": "not JSON", "input_tokens": 2, "output_tokens": 1}
+                self.assertIn("correction", payload)
+            return await original(provider, credential, model, instructions, payload)
+        self.gateway.side_effect = inference
+        run = await self.wait(await self.submit(schema_retries=1))
+        self.assertEqual(run["status"], "completed", run)
+        self.assertEqual(run["usage"]["model_calls"], 4)
+        self.assertTrue(any("correction" in e["message"] for e in run["events"]))
+        self.gateway.side_effect = None
+        self.gateway.return_value = {"text": "not JSON"}
+        run = await self.wait(await self.submit(schema_retries=2))
+        self.assertEqual(run["status"], "failed")
+        self.assertEqual(run["usage"]["model_calls"], 3)
+
+    async def test_review_correction_retains_worker_outputs(self):
+        self.reviews = [review(True, ["unknown"]), review()]
+        run = await self.wait(await self.submit(schema_retries=1))
+        self.assertEqual(run["status"], "completed", run)
+        self.assertEqual(run["tasks"][0]["attempts"], 1)
+        self.assertEqual(run["usage"]["model_calls"], 4)
+
+    async def test_relevant_project_evidence_shared_across_stages_and_redacted(self):
+        project = {"id": STORE_ID, "name": "Reference project", "documents": [
+            {"id": "doc", "title": "Design", "content": "Use purple. " + SECRET, "tags": []}],
+            "links": [{"id": "link", "url": "https://example.org", "description": "Saved reference"}]}
+        with patch.object(storage, "get_store", return_value=project):
+            run = await self.wait(await self.submit(goal='Use the purple design', include_project_context=True))
+        self.assertEqual(run["status"], "completed", run)
+        self.assertEqual(len(self.requests), 3)
+        for _, _, payload in self.requests:
+            self.assertEqual(payload["project_context"], run["project_context"])
+            self.assertIn('Use purple', json.dumps(payload['project_knowledge']))
+            self.assertLessEqual(payload['project_knowledge']['tokens'], 1500)
+            self.assertEqual(payload['project_knowledge']['tokens'], task_runner.project_knowledge.token_count(payload['project_knowledge']))
+        self.assertNotIn(SECRET, json.dumps(run))
+        project["documents"][0]["content"] = "Changed after submission"
+        self.assertIn('Use purple', json.dumps(run['knowledge_retrievals']))
+        self.assertNotIn('documents', run['project_context'])
+        self.requests.clear()
+        run = await self.wait(await self.submit())
+        self.assertNotIn("project_context", run)
+        self.assertTrue(all("project_context" not in payload for _, _, payload in self.requests))
+        self.assertTrue(all('project_knowledge' not in payload for _, _, payload in self.requests))
+
+    async def test_large_project_retrieves_relevant_passage_without_bulk_attachment(self):
+        project = {"id": STORE_ID, "documents": [{"content": "Unrelated text. " * 6000 + '\nThe purple design must use violet borders.'}]}
+        with patch.object(storage, "get_store", return_value=project):
+            run = await self.wait(await self.submit(goal='Draft the purple design', include_project_context=True))
+        self.assertEqual(run['status'], 'completed', run)
+        self.assertEqual(self.gateway.await_count, 3)
+        for _, _, payload in self.requests:
+            self.assertIn('violet borders', json.dumps(payload['project_knowledge']))
+            self.assertLess(len(json.dumps(payload['project_knowledge'])), 10000)
+
+    async def test_agents_reuse_only_their_project_results_and_keep_dependency_handoffs(self):
+        prior = self.runner.store.create(STORE_ID, models.RunInput(goal='Violet interface contract', provider='openai').model_dump())
+        other = self.runner.store.create(OTHER_STORE, models.RunInput(goal='Violet interface contract', provider='openai').model_dump())
+        self.runner.store.update(STORE_ID, prior['id'], lambda value: value.update(status='completed', final_output='Violet interface requires parse_rows and preserves empty cells.'))
+        self.runner.store.update(OTHER_STORE, other['id'], lambda value: value.update(status='completed', final_output='Violet interface PRIVATE_OTHER_PROJECT'))
+        self.plan = {'tasks': [planned('a'), {**planned('b', ['a']), 'provider': 'openai', 'model': 'gpt-5'}]}
+        run = await self.wait(await self.submit(goal='Extend the violet interface contract', include_project_context=True))
+        self.assertEqual(run['status'], 'completed', run)
+        self.assertEqual(run['usage']['model_calls'], 4)
+        self.assertEqual(len(run['knowledge_retrievals']), 4)
+        for _, _, payload in self.requests:
+            evidence = json.dumps(payload['project_knowledge'])
+            self.assertIn('preserves empty cells', evidence)
+            self.assertNotIn('PRIVATE_OTHER_PROJECT', json.dumps(payload))
+        worker = next(payload for _, _, payload in self.requests if payload.get('task', {}).get('id') == 'b')
+        self.assertEqual(worker['dependencies'], {'a': 'Output a'})
+        self.assertEqual(worker['dependency_sources'][0]['output_version'], 1)
+        self.assertEqual(worker['dependency_sources'][0]['model'], 'gpt-5-mini')
+        self.assertEqual(next(task for task in run['tasks'] if task['id'] == 'b')['model'], 'gpt-5')
+
+    async def test_optional_retrieval_failure_keeps_working_and_records_missing_evidence(self):
+        with patch.object(task_runner.project_knowledge, 'for_model', side_effect=providers.ProviderError(503, 'Unavailable')):
+            run = await self.wait(await self.submit(include_project_context=True))
+        self.assertEqual(run['status'], 'completed', run)
+        self.assertEqual(run['usage']['model_calls'], 3)
+        self.assertTrue(all(item['status'] == 'unavailable' for item in run['knowledge_retrievals']))
+        self.assertTrue(all(payload['project_knowledge']['results'] == [] for _, _, payload in self.requests))
 
     async def test_provider_error_usage_redaction_and_no_fallback(self):
         self.gateway.side_effect = models.InferenceError("Denied " + SECRET, {"input_tokens": 9, "output_tokens": 2})
@@ -421,7 +724,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
     async def test_cross_store_and_deleted_store_routes(self):
         run = await self.wait(await self.submit())
         other = f"/api/stores/{OTHER_STORE}/task-runs"
-        self.assertEqual((await self.client.get(other)).json(), {"runs": []})
+        self.assertEqual((await self.client.get(other)).json(), {"runs": [], "next_offset": None})
         self.assertEqual((await self.client.get(other + "/" + run["id"])).status_code, 404)
         self.assertEqual((await self.client.post(other + "/" + run["id"] + "/cancel", json={})).status_code, 404)
         self.existing.clear()
@@ -529,6 +832,56 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(sibling_stopped.is_set())
         self.assertEqual(run["usage"], {"input_tokens": 12, "output_tokens": 6, "model_calls": 3, "unknown_calls": 1})
         self.assertTrue(all(t["status"] == "failed" for t in run["tasks"]))
+
+    async def test_worker_revision_failure_retains_prior_outputs_and_review(self):
+        self.plan["tasks"] = [planned(), planned("b")]
+        self.reviews = [review(False, ["a"])]
+        async def failing_revision(*args):
+            if args[-2] == task_runner.WORKER and args[-1]["review_feedback"]:
+                self.assertEqual(args[-1]["previous_output"], "Output a")
+                raise models.InferenceError("HTTP 400 (POST /api/chat): Context length exceeded.",
+                                            {"input_tokens": 2, "output_tokens": 0})
+            return await self.infer(*args)
+        self.gateway.side_effect = failing_revision
+        run = await self.wait(await self.submit())
+        failed, completed = run["tasks"]
+        self.assertEqual(run["status"], "failed")
+        self.assertEqual((failed["status"], failed["output"], failed["attempts"]), ("failed", "Output a", 2))
+        self.assertEqual((completed["status"], completed["output"], completed["error"]), ("completed", "Output b", None))
+        self.assertEqual(run["error"], failed["error"])
+        self.assertIn("Task a failed [openai/gpt-5-mini]", run["error"])
+        self.assertIn("HTTP 400", run["error"])
+        self.assertEqual(len(run["reviews"]), 1)
+        self.assertEqual(run["revision_count"], 1)
+        self.assertEqual(self.gateway.await_count, 5)
+        self.assertEqual(run["usage"], {"input_tokens": 42, "output_tokens": 20, "model_calls": 5, "unknown_calls": 0})
+
+    async def test_cancelled_worker_late_error_cannot_overwrite_cancellation_or_events(self):
+        started = asyncio.Event()
+        async def late_error(*args):
+            if args[-2] != task_runner.WORKER:
+                return await self.infer(*args)
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                raise models.InferenceError("HTTP 503 (POST /api/chat): Service overloaded. " + SECRET,
+                                            {"input_tokens": 6, "output_tokens": 2}) from None
+        self.gateway.side_effect = late_error
+        run = await self.submit()
+        await asyncio.wait_for(started.wait(), 3)
+        response = await self.client.post(self.url + "/" + run["id"] + "/cancel", json={})
+        saved = response.json()
+        self.assertEqual(saved["status"], "cancelled")
+        self.assertIn("Cancelled by user", saved["error"])
+        self.assertEqual(saved["tasks"][0]["error"], saved["error"])
+        self.assertNotIn("HTTP 503", json.dumps(saved))
+        self.assertNotIn("Task a failed", json.dumps(saved["events"]))
+        self.assertNotIn(SECRET, self.runner.store.path.read_text())
+        self.assertEqual(saved["usage"], {"input_tokens": 16, "output_tokens": 7, "model_calls": 2, "unknown_calls": 0})
+        self.assertEqual(saved, self.runner.store.get(STORE_ID, run["id"]))
+        self.assertIsNone(self.runner.store.update(STORE_ID, run["id"], lambda value: value.update(error="late")))
+        self.assertEqual(self.gateway.await_count, 2)
 
     async def test_late_cancelled_response_cannot_complete(self):
         started = asyncio.Event()
@@ -861,7 +1214,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(storage, "list_stores", return_value=[{"id": STORE_ID}]):
                 self.assertEqual((await client.get("/api/stores")).json(), [{"id": STORE_ID}])
             self.assertEqual((await client.get("/api/providers")).status_code, 200)
-            self.assertEqual((await client.get(self.url)).json(), {"runs": []})
+            self.assertEqual((await client.get(self.url)).json(), {"runs": [], "next_offset": None})
         await self.runner.shutdown()
         async with api.app.router.lifespan_context(api.app):
             self.assertTrue(self.runner.ready)
@@ -869,7 +1222,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
 
 class InferenceTests(unittest.IsolatedAsyncioTestCase):
-    async def call(self, provider="openai", payload=None, status=200, headers=None):
+    async def call(self, provider="openai", payload=None, status=200, headers=None, model=None, options=None):
         payload = payload or {"status": "completed", "output": [{"type": "message", "content": [{"type": "output_text", "text": "Draft " + SECRET}]}],
                               "usage": {"input_tokens": 3, "output_tokens": 2}}
         real_client = httpx.AsyncClient
@@ -878,12 +1231,41 @@ class InferenceTests(unittest.IsolatedAsyncioTestCase):
             self.requests.append(request)
             return httpx.Response(status, json=payload, headers=headers)
         def factory(**kwargs):
+            self.client_options = kwargs
             self.assertFalse(kwargs["trust_env"])
             self.assertFalse(kwargs["follow_redirects"])
             return real_client(transport=httpx.MockTransport(handle), **kwargs)
-        with patch.object(models.httpx, "AsyncClient", side_effect=factory), patch.object(models.tiktoken, "get_encoding") as encoding:
+        with patch.object(models.httpx, "AsyncClient", side_effect=factory), patch.object(models.tokenization, "get_encoding") as encoding:
             encoding.return_value.encode.return_value = [0]
-            return await models.infer(provider, SECRET, "gpt-5" if provider == "openai" else "claude-sonnet-4", "Draft", {"goal": "Draft"})
+            return await models.infer(provider, SECRET, model or ("gpt-5" if provider == "openai" else "claude-sonnet-4"), "Draft", {"goal": "Draft"}, options=options)
+
+    async def test_astra_uses_reasoning_profile_and_bounded_overrides(self):
+        await self.call(model="gpt-6-astra")
+        body = json.loads(self.requests[0].content)
+        self.assertEqual(body["reasoning"], {"effort": "low"})
+        self.assertEqual(body["max_output_tokens"], 16384)
+        self.assertEqual(self.client_options["timeout"], 300)
+        self.assertNotIn("temperature", body)
+        await self.call(model="gpt-6-astra", options={"reasoning_effort": "high", "output_tokens": 24000, "timeout_seconds": 480})
+        body = json.loads(self.requests[0].content)
+        self.assertEqual(body["reasoning"], {"effort": "high"})
+        self.assertEqual(body["max_output_tokens"], 24000)
+        self.assertEqual(self.client_options["timeout"], 480)
+
+    async def test_output_budget_error_retains_usage_and_useful_diagnostic(self):
+        with self.assertRaises(models.InferenceError) as error:
+            await self.call(model="gpt-6-astra", payload={"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"},
+                                                        "usage": {"input_tokens": 10, "output_tokens": 16384}})
+        self.assertEqual(error.exception.kind, "output_limit")
+        self.assertIn("including reasoning", str(error.exception))
+        self.assertEqual(error.exception.usage["output_tokens"], 16384)
+
+    async def test_model_failure_reports_status_and_category_without_provider_text(self):
+        with self.assertRaises(models.InferenceError) as error:
+            await self.call(status=404, payload={"error": {"code": "model_not_found", "message": SECRET}})
+        self.assertIn("HTTP 404 (POST /responses)", str(error.exception))
+        self.assertEqual(error.exception.kind, "model_unavailable")
+        self.assertNotIn(SECRET, str(error.exception))
 
     async def test_openai_privacy_fixed_url_usage_and_redaction(self):
         result = await self.call()

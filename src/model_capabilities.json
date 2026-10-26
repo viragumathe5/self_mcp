@@ -1,0 +1,13 @@
+{
+  "profiles": [
+    {
+      "name": "GPT-6 Astra",
+      "pattern": "(?:^|/)gpt-6-astra(?:-|$)",
+      "kinds": ["openai", "openai_compatible"],
+      "timeout_seconds": 300,
+      "output_tokens": 16384,
+      "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"],
+      "reasoning_default": "low"
+    }
+  ]
+}

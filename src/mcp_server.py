@@ -1,8 +1,8 @@
 """
-mcp_server.py — per-store MCP SSE server.
-Each store gets its own endpoint: http://localhost:8001/<store_slug>/sse
-
-Discovery endpoint: GET http://localhost:8001/stores
+mcp_server.py — per-project MCP, mounted in the workspace API.
+Primary endpoint: http://127.0.0.1:8000/mcp/<store_slug>/mcp
+Discovery: GET http://127.0.0.1:8000/mcp/stores
+Running this file directly retains the standalone port-8001 service.
   Returns JSON list of { name, slug, url } for all stores.
 
 Documents are exposed as:
@@ -17,16 +17,23 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 import storage
 import json
+from starlette.concurrency import run_in_threadpool
+from pydantic import ValidationError
+from providers import ProviderError
+import mcp_knowledge
 
 from mcp.server import Server
+from mcp.server.lowlevel.helper_types import ReadResourceContents
 from mcp.server.sse import SseServerTransport
+from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.types import (
     Tool, TextContent,
-    Resource, ReadResourceResult, TextResourceContents,
+    Resource, ResourceTemplate,
     Prompt, PromptMessage, GetPromptResult,
 )
 
 import uvicorn
+import mcp_tasks
 
 logger = logging.getLogger(__name__)
 
@@ -40,9 +47,9 @@ def make_mcp_server(store_id: str, store_name: str) -> Server:
 
     @srv.list_tools()
     async def list_tools():
-        return [
+        return mcp_tasks.task_tools() + mcp_knowledge.tools() + [
             Tool(name="list_documents",
-                 description=f"List all documents in the '{store_name}' store.",
+                 description=f"List saved documents in the '{store_name}' store. Generated task knowledge is available through list_task_results and search_task_results.",
                  inputSchema={"type": "object", "properties": {}}),
             Tool(name="get_document",
                  description="Get full content of a document by ID.",
@@ -141,22 +148,24 @@ def make_mcp_server(store_id: str, store_name: str) -> Server:
                      "plan_id": {"type": "string"},
                      "output":  {"type": "string", "description": "The final synthesised output combining all subtask results"},
                  }, "required": ["plan_id", "output"]}),
-            Tool(name="spawn_subagent",
-                 description=(
-                     "Spawn an independent parallel worker agent to complete one subtask. "
-                     "Call this once per ready subtask SIMULTANEOUSLY — do not await one before spawning the next. "
-                     "The worker runs in the background; poll get_plan_status to know when it finishes. "
-                     "Only spawn subtasks whose depends_on are already done."
-                 ),
-                 inputSchema={"type": "object", "properties": {
-                     "plan_id":    {"type": "string", "description": "The plan this subtask belongs to"},
-                     "subtask_id": {"type": "string", "description": "The specific subtask ID to work on"},
-                     "store_slug": {"type": "string", "description": "The project slug (e.g. 'pizza')"},
-                 }, "required": ["plan_id", "subtask_id", "store_slug"]}),
+
         ]
 
     @srv.call_tool()
     async def call_tool(name: str, arguments: dict):
+        if name in mcp_knowledge.NAMES:
+            try:
+                result = await run_in_threadpool(mcp_knowledge.call, store_id, name, arguments)
+            except ProviderError as error:
+                raise ValueError(error.message) from None
+            except (ValidationError, ValueError, TypeError):
+                raise ValueError("Invalid task knowledge arguments. Use the tool schema and returned result IDs.") from None
+            return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False))]
+        if name in mcp_tasks.NAMES:
+            result = await mcp_tasks.call_task_tool(store_id, name, arguments)
+            if result.isError:
+                raise ValueError(result.content[0].text)
+            return result.content
         if name == "list_documents":
             docs = storage.list_documents(store_id)
             if not docs:
@@ -401,31 +410,7 @@ def make_mcp_server(store_id: str, store_name: str) -> Server:
             return [TextContent(type="text", text=f"✅ Plan **{plan['title']}** finalised and marked done.")]
 
         if name == "spawn_subagent":
-            import subprocess, shutil
-            plan_id    = arguments["plan_id"]
-            subtask_id = arguments["subtask_id"]
-            slug       = arguments["store_slug"]
-
-            opencode_bin = shutil.which("opencode") or "/opt/homebrew/bin/opencode"
-            message = (
-                f"You are a worker agent. Your only job is to complete ONE subtask. "
-                f"Connect to the self_mcp MCP server for project '{slug}'. "
-                f"Call get_next_task with plan_id='{plan_id}' and agent_name='worker-{subtask_id[:8]}'. "
-                f"Do the work described. "
-                f"Call complete_subtask with plan_id='{plan_id}', subtask_id='{subtask_id}', your output, and a short summary. "
-                f"Then stop — do not do anything else."
-            )
-            # Fire-and-forget: Popen returns immediately, worker runs in background
-            proc = subprocess.Popen(
-                [opencode_bin, "run", "--agent", "worker", "--dangerously-skip-permissions", message],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-            return [TextContent(type="text", text=
-                f"🚀 Worker spawned (pid {proc.pid}) for subtask `{subtask_id[:8]}…` in plan `{plan_id[:8]}…`. "
-                f"Poll `get_plan_status` with plan_id=`{plan_id}` to track progress."
-            )]
+            raise ValueError("The unsupported external CLI spawner has been retired. Use start_task_run with a goal and configured provider, then get_task_run to track supervised workers. Existing manual plans remain accessible through the plan tools.")
 
         return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
@@ -441,20 +426,33 @@ def make_mcp_server(store_id: str, store_name: str) -> Server:
                 mimeType="text/markdown",
             )
             for d in storage.list_documents(store_id)
-        ]
+        ] + [Resource(uri=f"task-knowledge://{store_id}/index", name="Generated task knowledge",
+                      description="Live index of saved final answers, worker drafts, versions and reviews. Use list_task_results/search_task_results for pagination and search.",
+                      mimeType="application/json")]
+
+    @srv.list_resource_templates()
+    async def list_resource_templates():
+        return [ResourceTemplate(uriTemplate=f"task-result://{store_id}/{{result_id}}{{?offset,limit}}",
+            name="Saved task result", description="Read generated project knowledge in character pages. IDs and URIs come from list_task_results/search_task_results; next_offset continues long results.", mimeType="application/json"),
+            ResourceTemplate(uriTemplate=f"project-knowledge://{store_id}/{{source_id}}{{?offset,limit}}",
+                name="Project knowledge source", description="Read a document or saved link returned by search_project_knowledge, within this project only.", mimeType="application/json")]
 
     @srv.read_resource()
     async def read_resource(uri: str):
+        uri = str(uri)
+        if uri.startswith(("task-knowledge://", "task-result://", "project-knowledge://")):
+            try:
+                result = await run_in_threadpool(mcp_knowledge.read_uri, store_id, uri)
+            except ProviderError as error:
+                raise ValueError(error.message) from None
+            except (ValidationError, ValueError, TypeError):
+                raise ValueError("Invalid task knowledge resource URI.") from None
+            return [ReadResourceContents(content=json.dumps(result, ensure_ascii=False), mime_type="application/json")]
         doc_id = uri.replace("doc://", "")
         doc = storage.get_document(store_id, doc_id)
         if not doc:
             raise ValueError(f"Resource not found: {uri}")
-        return ReadResourceResult(
-            contents=[TextResourceContents(
-                uri=uri, mimeType="text/markdown",
-                text=f"# {doc['title']}\n\n{doc['content']}"
-            )]
-        )
+        return [ReadResourceContents(content=f"# {doc['title']}\n\n{doc['content']}", mime_type="text/markdown")]
 
     # ── Prompts — each document is exposed as a named prompt ──────────────────
     # This is the primary mechanism for AI clients to receive doc contents
@@ -519,50 +517,22 @@ def make_mcp_server(store_id: str, store_name: str) -> Server:
                     role="user",
                     content=TextContent(type="text", text=f"""# Autonomous Plan Agent — {store_name}
 
-You are an autonomous orchestrator. Work through plans completely on your own. Never ask the user for permission or clarification between steps.
+Use the supervised task tools when the user asks you to run a goal with configured models:
 
-## Output directory
+1. Call `task_providers` to inspect available connections and routing permissions.
+2. Call `task_model_options` for a selected provider or `auto` to inspect the models.
+3. Call `list_task_runs` to find the existing workspace task. For a follow-up, read it with
+   `get_task_run` and use `continue_task_run` with its run ID, expected turn ID and a new message UUID.
+   Use `start_task_run` only for a genuinely new task. Preserve the task's provider/mode/settings
+   unless the user changes them. Set `include_project_context` only when the user wants the saved project material shared.
+   Set `schema_retries` to 1 to allow a bounded correction of invalid plan/review JSON.
+4. Read progress with `get_task_run` using the returned run ID. Workers are scheduled automatically,
+   respecting dependencies and the two-call concurrency limit. Do not start duplicate runs while waiting.
+5. Return the final output, or explain the recorded error. Use `cancel_task_run` when asked to stop.
 
-All generated files MUST be saved to:
-  `/Users/vumathe/personal/self_mcp/output/{store_id}/`
-
-- Create this directory if it doesn't exist.
-- Each plan gets its own subfolder: `output/{store_id}/<plan_slug>/`
-- NEVER save to /tmp or any other location.
-- When editing an existing file, read it first, make surgical edits, preserve all existing structure. Do NOT rewrite from scratch.
-- If a file has scroll issues or broken layout, fix only the CSS/HTML causing that — do not touch unrelated sections.
-
-## Fork-join execution model
-
-When you call `create_plan` and get back N subtasks:
-
-1. **FORK** — Spawn one subagent per subtask that has no unmet dependencies. Run them ALL in parallel simultaneously — do not wait for one to finish before starting the next.
-2. Each subagent works independently: reads its subtask via `get_next_task`, does the work, calls `complete_subtask`.
-3. **JOIN** — Once all parallel subagents are done (poll with `get_plan_status`), collect all their outputs.
-4. **MERGE** — You (the orchestrator) synthesise all outputs into the final coherent deliverable and call `finalize_plan`.
-
-If subtasks have `depends_on`, fork a second wave once those dependencies complete.
-
-Never run subtasks serially one-by-one. Always maximise parallelism.
-
-## Your operating loop
-
-```
-create_plan(title, idea, subtasks=[...])   ← decompose now, all subtasks in one call
-  → fork N subagents in parallel, each:
-      get_next_task(plan_id)
-      <do the work>
-      complete_subtask(plan_id, subtask_id, output)
-  → orchestrator polls get_plan_status until all done
-  → orchestrator merges outputs → finalize_plan
-```
-
-## File editing rules
-
-- Always `read` a file before editing it.
-- Make minimal, targeted changes — never rewrite entire files.
-- Preserve all existing HTML structure, CSS classes, scroll behaviour.
-- If creating a website: use semantic HTML, `overflow: auto` on scrollable containers, no fixed heights on content sections.
+These workers draft and review text/code. They do not run code or write files.
+The legacy plan tools below support manual coordination by an external client; creating a manual
+plan does not launch workers. Do not mix manual plan IDs with supervised task run IDs.
 
 ## Current plans in {store_name}
 
@@ -649,7 +619,19 @@ async def asgi_app(scope, receive, send):
     if scope["type"] != "http":
         return
 
-    path: str = scope.get("path", "")
+    # Apply the same local access boundary as the API before proxying billable work.
+    from starlette.requests import Request
+    from fastapi import HTTPException
+    from provider_api import guard_request
+    try:
+        guard_request(Request(scope))
+    except HTTPException as error:
+        await _respond(send, error.status_code, str(error.detail).encode())
+        return
+
+    # Starlette preserves the full path when this app is mounted under /mcp.
+    prefix = scope.get("root_path", "").rstrip("/")
+    path: str = scope.get("path", "").removeprefix(prefix)
     method: str = scope.get("method", "GET")
 
     # ── GET /stores — discovery ───────────────────────────────────────────────
@@ -658,7 +640,8 @@ async def asgi_app(scope, receive, send):
         body = json.dumps([
             {"name": s["name"], "slug": s["slug"],
              "description": s.get("description", ""),
-             "url": f"http://localhost:8001/{s['slug']}/sse"}
+             "url": f"http://{Request(scope).headers['host']}{prefix}/{s['slug']}/mcp",
+             "sse_url": f"http://{Request(scope).headers['host']}{prefix}/{s['slug']}/sse"}
             for s in stores
         ]).encode()
         await _respond(send, 200, body, "application/json")
@@ -669,9 +652,22 @@ async def asgi_app(scope, receive, send):
         await _respond(send, 200, b"ok")
         return
 
-    # ── /<slug>/sse — SSE connection ──────────────────────────────────────────
     parts = path.strip("/").split("/")
-    if len(parts) >= 2 and parts[1] == "sse" and method == "GET":
+    if len(parts) == 2 and parts[1] == "mcp":
+        store = storage.get_store_by_slug(parts[0])
+        if not store:
+            await _respond(send, 404, b"Project not found. Copy its MCP URL from MCP Setup.")
+            return
+        # Tools use durable storage/API state, so no transport session is needed.
+        # A request-local manager also picks up new projects without a restart.
+        manager = StreamableHTTPSessionManager(
+            make_mcp_server(store["id"], store["name"]), json_response=True, stateless=True)
+        async with manager.run():
+            await manager.handle_request(scope, receive, send)
+        return
+
+    # Retain SSE for clients with an existing configuration.
+    if len(parts) == 2 and parts[1] == "sse" and method == "GET":
         slug = parts[0]
         transport, server = _get_store_handler(slug)
         if not transport:
@@ -682,7 +678,7 @@ async def asgi_app(scope, receive, send):
         return
 
     # ── /<slug>/messages/ — POST from MCP client ──────────────────────────────
-    if len(parts) >= 2 and parts[1] == "messages" and method == "POST":
+    if len(parts) == 2 and parts[1] == "messages" and method == "POST":
         slug = parts[0]
         transport, _ = _get_store_handler(slug)
         if not transport:
@@ -697,8 +693,7 @@ async def asgi_app(scope, receive, send):
 async def _respond(send, status: int, body: bytes, content_type: str = "text/plain"):
     await send({"type": "http.response.start", "status": status,
                 "headers": [[b"content-type", content_type.encode()],
-                             [b"content-length", str(len(body)).encode()],
-                             [b"access-control-allow-origin", b"*"]]})
+                             [b"content-length", str(len(body)).encode()]]})
     await send({"type": "http.response.body", "body": body})
 
 
@@ -709,4 +704,4 @@ if __name__ == "__main__":
     for s in stores:
         print(f"  Store '{s['name']}': http://localhost:8001/{s['slug']}/sse")
     print()
-    uvicorn.run(asgi_app, host="0.0.0.0", port=8001, log_level="warning")
+    uvicorn.run(asgi_app, host="127.0.0.1", port=8001, log_level="warning", timeout_graceful_shutdown=5)

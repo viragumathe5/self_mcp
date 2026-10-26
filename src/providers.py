@@ -3,12 +3,15 @@
 from contextlib import contextmanager
 import asyncio
 import fcntl
+import ipaddress
 import json
 import os
 from pathlib import Path
 import re
 import tempfile
 import threading
+from urllib.parse import unquote, urlsplit, urlunsplit
+from uuid import uuid4
 
 import httpx
 
@@ -26,13 +29,91 @@ MODEL_PATTERN = r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}"
 KEYRING_SERVICE = "self_mcp.providers"
 MAX_MODEL_PAGES = 5
 MODEL_LIST_TIMEOUT = 30.0
+PROFILE_PATTERN = r"profile_[0-9a-f]{32}"
+PROFILE_KINDS = {"ollama", "openai_compatible"}
+ROUTING_MODES = {"local_only", "local_first", "balanced", "quality"}
+
+
+def normalize_base_url(value: str) -> tuple[str, bool]:
+    """Validate explicit connection configuration without making network requests."""
+    try:
+        if not isinstance(value, str) or not 1 <= len(value) <= 2048:
+            raise ValueError
+        decoded = unquote(value)
+        if any(not c.isprintable() or c.isspace() for c in decoded) or "\\" in decoded:
+            raise ValueError
+        url = urlsplit(value)
+        host = url.hostname
+        if url.scheme not in {"http", "https"} or not host or url.username is not None or url.password is not None:
+            raise ValueError
+        if "?" in value or "#" in value or "%" in host or (url.port is not None and not 1 <= url.port <= 65535):
+            raise ValueError
+        local = host in {"localhost", "127.0.0.1", "::1"}
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            if not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?", host):
+                raise ValueError
+            if all(part.isdigit() or part.startswith("0x") for part in host.split(".")):
+                raise ValueError
+            if host in {"metadata", "metadata.google.internal", "instance-data", "instance-data.ec2.internal"}:
+                raise ValueError
+        else:
+            checked = address.ipv4_mapped if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped else address
+            metadata = str(checked) in {"100.100.100.200", "168.63.129.16", "fd00:ec2::254", "fd20:ce::254"}
+            if metadata or checked.is_link_local or checked.is_unspecified or checked.is_multicast or (checked.is_reserved and not local):
+                raise ValueError
+        if url.scheme == "http" and not local:
+            raise ValueError
+        # Reject ambiguous path traversal/encoded separators rather than changing hosts or paths implicitly.
+        if any(part in {".", ".."} for part in decoded.split("/")) or re.search(r"%2f|%5c|%25", value, re.I):
+            raise ValueError
+        authority = f"[{host}]" if ":" in host else host
+        if url.port is not None and url.port != (443 if url.scheme == "https" else 80):
+            authority += f":{url.port}"
+        path = re.sub(r"/+", "/", url.path).rstrip("/")
+        return urlunsplit((url.scheme, authority, path, "", "")), local
+    except (ValueError, TypeError, UnicodeError):
+        raise ProviderError(422, "Provide an HTTP loopback or HTTPS provider base URL without credentials, query, fragment, or unsafe addresses.") from None
+
+
+def validate_metadata(values, secrets) -> None:
+    for value in values:
+        decoded = unquote(value)
+        if any(secret and (secret in value or secret in decoded) for secret in secrets):
+            raise ProviderError(422, "Provider metadata must not contain API credentials.")
+
+
+def validate_allowed_models(value) -> list[str]:
+    if not isinstance(value, list) or len(value) > 50 or any(
+        not isinstance(model, str) or not re.fullmatch(MODEL_PATTERN, model) for model in value
+    ) or len(set(value)) != len(value):
+        raise ProviderError(422, "Allowed models must contain at most 50 unique, valid model identifiers.")
+    return list(value)
+
+
+def validate_profile(name, kind, base_url, model, context_tokens, output_tokens, requires_key, storage, allowed_models=None):
+    if not isinstance(name, str) or not 1 <= len(name.strip()) <= 80 or len(name) > 80 or not name.isprintable():
+        raise ProviderError(422, "Provide a profile name of 1-80 printable characters.")
+    if kind not in PROFILE_KINDS or storage not in {"session", "keyring"} or type(requires_key) is not bool:
+        raise ProviderError(422, "Invalid provider profile settings.")
+    if not isinstance(model, str) or (model and not re.fullmatch(MODEL_PATTERN, model)):
+        raise ProviderError(422, "Provide a valid model identifier, or leave it empty until discovery.")
+    if type(context_tokens) is not int or type(output_tokens) is not int or not 2 <= context_tokens <= 2_000_000 or not 1 <= output_tokens < context_tokens:
+        raise ProviderError(422, "Token limits must satisfy 1 <= output_tokens < context_tokens <= 2000000.")
+    base_url, local = normalize_base_url(base_url)
+    allowed_models = validate_allowed_models([] if allowed_models is None else allowed_models)
+    return {"name": name.strip(), "kind": kind, "base_url": base_url, "model": model,
+            "context_tokens": context_tokens, "output_tokens": output_tokens,
+            "requires_key": requires_key, "is_local": local, "allowed_models": allowed_models}
 
 
 class ProviderError(Exception):
-    def __init__(self, status: int, message: str):
+    def __init__(self, status: int, message: str, *, kind=None):
         super().__init__(message)
         self.status = status
         self.message = message
+        self.kind = kind
 
 
 def validate_provider(provider: str) -> None:
@@ -110,6 +191,30 @@ class ProviderSettings:
             models = raw.get("models", {})
             if not isinstance(models, dict):
                 raise ValueError
+            profiles = raw.get("profiles", {})
+            if not isinstance(profiles, dict) or len(profiles) > 18:
+                raise ValueError
+            clean_profiles = {}
+            for identifier, profile in profiles.items():
+                if not re.fullmatch(PROFILE_PATTERN, identifier) or not isinstance(profile, dict):
+                    raise ValueError
+                storage = profile.get("credential_storage", "none")
+                if storage not in {"none", "session", "keyring"}:
+                    raise ValueError
+                clean = validate_profile(
+                    profile.get("name"), profile.get("kind"), profile.get("base_url"),
+                    profile.get("model", ""), profile.get("context_tokens", 8192),
+                    profile.get("output_tokens", 2048), profile.get("requires_key", False),
+                    storage if storage != "none" else "session",
+                    validate_allowed_models(profile.get("allowed_models", [])),
+                )
+                clean["credential_storage"] = storage
+                # An expired session credential must not downgrade to anonymous access.
+                clean["requires_key"] = clean["requires_key"] or storage != "none"
+                clean_profiles[identifier] = clean
+            known = set(PROVIDERS) | set(clean_profiles)
+            routing = raw.get("routing", {"mode": "local_only", "providers": []})
+            self._validate_routing(routing, known)
             # Only these fields may ever be written back, even after external edits.
             return {
                 "models": {
@@ -117,10 +222,12 @@ class ProviderSettings:
                     if p in PROVIDERS and isinstance(m, str) and re.fullmatch(MODEL_PATTERN, m)
                 },
                 "default_provider": raw.get("default_provider")
-                if raw.get("default_provider") in PROVIDERS else None,
+                if raw.get("default_provider") in known else None,
                 "onboarding_dismissed": raw.get("onboarding_dismissed") is True,
+                "profiles": clean_profiles,
+                "routing": {"mode": routing["mode"], "providers": list(routing["providers"])},
             }
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, ProviderError):
             raise ProviderError(503, "Provider preferences could not be read.") from None
 
     def _write(self, settings: dict) -> None:
@@ -166,10 +273,93 @@ class ProviderSettings:
                 return credential, "keyring"
         return None, None
 
+    def _profile_resolve(self, provider, profile):
+        storage = profile["credential_storage"]
+        if storage == "session":
+            credential = self._sessions.get(provider)
+            return credential, "session" if credential else "none"
+        if storage == "keyring":
+            backend = self._backend()
+            if backend is None:
+                return None, "none"
+            try:
+                credential = backend.get_password(KEYRING_SERVICE, provider)
+            except Exception:
+                raise ProviderError(503, "System keyring is unavailable or locked.") from None
+            return credential, "keyring" if credential else "none"
+        return None, "none"
+
+    @staticmethod
+    def _profile(settings, provider):
+        if provider not in settings["profiles"]:
+            raise ProviderError(404, "Unknown provider profile.")
+        return settings["profiles"][provider]
+
     def resolve(self, provider: str) -> tuple[str | None, str | None]:
-        validate_provider(provider)
-        with self._mutex:
-            return self._resolve(provider, self._backend())
+        if provider in PROVIDERS:
+            with self._mutex:
+                return self._resolve(provider, self._backend())
+        with self._locked():
+            return self._profile_resolve(provider, self._profile(self._load(), provider))
+
+    def connection(self, provider_id: str) -> dict:
+        return self._connection(provider_id)
+
+    def _connection(self, provider_id: str, api_key: str | None = None) -> dict:
+        """Resolve a snapshot under one lock; test keys never change saved state."""
+        with self._locked():
+            settings = self._load()
+            if provider_id in PROVIDERS:
+                credential = api_key or self._resolve(provider_id, self._backend())[0]
+                result = {"id": provider_id, "kind": provider_id,
+                          "base_url": PROVIDERS[provider_id][2].removesuffix("/models"),
+                          "is_local": False, "api_key": credential, "context_tokens": 8192,
+                          "output_tokens": 2048, "requires_key": True, "allowed_models": []}
+            else:
+                profile = self._profile(settings, provider_id)
+                credential = api_key or self._profile_resolve(provider_id, profile)[0]
+                validate_metadata((profile["name"], profile["model"], profile["base_url"], *profile["allowed_models"]), [credential])
+                result = {key: profile[key] for key in ("kind", "base_url", "is_local", "context_tokens", "output_tokens", "requires_key", "allowed_models")}
+                result.update(id=provider_id, api_key=credential)
+            if result["requires_key"] and not credential:
+                raise ProviderError(422, "This provider requires an API key. Re-enter its credential before connecting.")
+            return result
+
+    @staticmethod
+    def _validate_routing(routing, known):
+        if not isinstance(routing, dict) or routing.get("mode") not in ROUTING_MODES:
+            raise ProviderError(422, "Invalid routing mode.")
+        ids = routing.get("providers")
+        if not isinstance(ids, list) or len(ids) > 20 or any(not isinstance(p, str) or p not in known for p in ids) or len(set(ids)) != len(ids):
+            raise ProviderError(422, "Routing requires at most 20 unique, existing provider IDs.")
+
+    def routing(self) -> dict:
+        with self._locked():
+            return self._load()["routing"]
+
+    def save_routing(self, mode: str, providers: list[str]) -> dict:
+        with self._locked():
+            settings = self._load()
+            routing = {"mode": mode, "providers": list(providers)}
+            self._validate_routing(routing, set(PROVIDERS) | set(settings["profiles"]))
+            settings["routing"] = routing
+            self._write(settings)
+            return routing
+
+    def catalog(self) -> list[dict]:
+        """Read routing metadata without accessing credentials, environment, or keyring."""
+        with self._locked():
+            settings = self._load()
+            rows = [{"id": provider, "name": name, "kind": provider,
+                     "base_url": endpoint.removesuffix("/models"), "is_local": False,
+                     "default_model": settings["models"].get(provider), "requires_key": True,
+                     "context_tokens": 8192, "output_tokens": 2048, "allowed_models": []}
+                    for provider, (name, _, endpoint) in PROVIDERS.items()]
+            for provider, profile in settings["profiles"].items():
+                rows.append({"id": provider, "default_model": profile["model"],
+                             **{key: profile[key] for key in ("name", "kind", "base_url", "is_local",
+                                                             "requires_key", "context_tokens", "output_tokens", "allowed_models")}})
+            return rows
 
     def status(self) -> dict:
         with self._locked():
@@ -186,11 +376,29 @@ class ProviderSettings:
                 providers.append({
                     "id": provider, "name": name, "configured": bool(credential),
                     "source": source, "default_model": settings["models"].get(provider),
+                    "kind": provider, "base_url": PROVIDERS[provider][2].removesuffix("/models"),
+                    "is_local": False, "allow_routing": provider in settings["routing"]["providers"],
+                    "allowed_models": [],
+                })
+            for provider, profile in settings["profiles"].items():
+                try:
+                    credential, source = self._profile_resolve(provider, profile)
+                except ProviderError:
+                    credential, source = None, "none"
+                    available = False
+                validate_metadata((profile["name"], profile["model"], profile["base_url"], *profile["allowed_models"]), [credential])
+                providers.append({
+                    "id": provider, "name": profile["name"],
+                    "configured": not profile["requires_key"] or bool(credential),
+                    "source": source, "default_model": profile["model"],
+                    **{key: profile[key] for key in ("kind", "base_url", "is_local", "context_tokens", "output_tokens", "requires_key", "allowed_models")},
+                    "allow_routing": provider in settings["routing"]["providers"],
                 })
             return {
                 "providers": providers, "keyring_available": available,
                 "default_provider": settings["default_provider"],
                 "onboarding_dismissed": settings["onboarding_dismissed"],
+                "routing": settings["routing"],
             }
 
     @contextmanager
@@ -232,9 +440,12 @@ class ProviderSettings:
             credential, _ = (api_key, None) if api_key is not None else self._resolve(provider, backend)
             if not credential:
                 raise ProviderError(422, "Configure a provider credential before saving settings.")
-            if not re.fullmatch(MODEL_PATTERN, model) or credential in model:
+            if model and (not re.fullmatch(MODEL_PATTERN, model) or credential in model):
                 raise ProviderError(422, "Provide a valid, non-secret model identifier (1-200 characters).")
-            settings["models"][provider] = model
+            if model:
+                settings["models"][provider] = model
+            else:
+                settings["models"].pop(provider, None)
             if make_default:
                 settings["default_provider"] = provider
             if api_key is not None:
@@ -254,17 +465,76 @@ class ProviderSettings:
             message += " Warning: keyring is unavailable, so any previously saved keyring credential could not be removed. This is not a confirmed session-only switch: the older credential may become active again after restart when keyring access returns. Restore keyring access and save the session key again to remove it."
         return {"message": message}
 
-    def remove(self, provider: str) -> dict:
-        validate_provider(provider)
+    def prepare_profile(self, *, name: str, kind: str, base_url: str, storage: str,
+                        model: str = "", api_key: str | None = None, make_default: bool = False,
+                        context_tokens: int = 8192, output_tokens: int = 2048,
+                        requires_key: bool = False, allowed_models: list[str] | None = None) -> dict:
+        if api_key and not re.fullmatch(r"[!-~]{1,4096}", api_key):
+            raise ProviderError(422, "Invalid API key format.")
+        profile = validate_profile(name, kind, base_url, model, context_tokens, output_tokens, requires_key, storage, allowed_models)
+        with self._mutex:
+            secrets = [api_key, *self._sessions.values(), *(os.environ.get(p[1]) for p in PROVIDERS.values())]
+            validate_metadata((name, model, base_url, *profile["allowed_models"]), secrets)
+        profile["requires_key"] = requires_key or bool(api_key)
+        return profile
+
+    def save_profile(self, *, provider_id: str | None = None, clear_api_key: bool = False,
+                     api_key: str | None = None, storage: str, make_default: bool = False, **fields) -> dict:
+        api_key = api_key or None
+        if clear_api_key and api_key:
+            raise ProviderError(422, "Choose either a new API key or clear_api_key.")
+        profile = self.prepare_profile(api_key=api_key, storage=storage, **fields)
         with self._locked():
             settings = self._load()
-            backend = self._backend()
+            previous = self._profile(settings, provider_id) if provider_id is not None else None
+            if previous is None and len(settings["profiles"]) >= 18:
+                raise ProviderError(422, "At most 18 custom provider profiles are supported.")
+            if previous and any(profile[key] != previous[key] for key in ("kind", "base_url")):
+                raise ProviderError(422, "Profile kind and base URL are immutable. Recreate the profile to use a different endpoint.")
+            previous_storage = previous["credential_storage"] if previous else "none"
+            if previous and "allowed_models" not in fields:
+                profile["allowed_models"] = list(previous["allowed_models"])
+            old_key = self._profile_resolve(provider_id, previous)[0] if previous else None
+            validate_metadata((profile["name"], profile["model"], profile["base_url"], *profile["allowed_models"]), [old_key, api_key])
+            provider_id = provider_id or "profile_" + uuid4().hex
+            profile["credential_storage"] = storage if api_key else ("none" if clear_api_key else previous_storage)
+            if previous and not clear_api_key:
+                profile["requires_key"] = profile["requires_key"] or previous["requires_key"]
+            settings["profiles"][provider_id] = profile
+            if make_default:
+                settings["default_provider"] = provider_id
+            change_vault = (api_key and storage == "keyring") or ((api_key or clear_api_key) and previous_storage == "keyring")
+            backend = self._backend() if change_vault else None
+            if change_vault and backend is None:
+                raise ProviderError(503, "A secure system keyring is unavailable. Restore keyring access before changing its credentials.")
+            with self._keyring_change(provider_id, backend, api_key if storage == "keyring" and not clear_api_key else None):
+                self._write(settings)
+            if api_key or clear_api_key:
+                self._sessions.pop(provider_id, None)
+                if api_key and storage == "session":
+                    self._sessions[provider_id] = api_key
+            return {"id": provider_id, "message": "Provider profile saved. Session credentials last for this API process only. No inference was performed."}
+
+    def remove(self, provider: str) -> dict:
+        with self._locked():
+            settings = self._load()
+            if provider not in PROVIDERS:
+                profile = self._profile(settings, provider)
+                backend = self._backend() if profile["credential_storage"] == "keyring" else None
+                if profile["credential_storage"] == "keyring" and backend is None:
+                    raise ProviderError(503, "Restore system keyring access before removing this profile and its credential.")
+                del settings["profiles"][provider]
+            else:
+                backend = self._backend()
             settings["models"].pop(provider, None)
+            settings["routing"]["providers"] = [p for p in settings["routing"]["providers"] if p != provider]
             if settings["default_provider"] == provider:
                 settings["default_provider"] = None
             with self._keyring_change(provider, backend, None):
                 self._write(settings)
             self._sessions.pop(provider, None)
+            if provider not in PROVIDERS:
+                return {"message": "Provider profile, managed credentials, and routing membership removed."}
             message = "App-managed session credential and model settings removed."
             if backend is None:
                 message += " Keyring unavailable; any existing keyring credential could not be removed."

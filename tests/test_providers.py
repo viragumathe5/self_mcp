@@ -78,10 +78,13 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
     async def test_empty_exact_shape(self):
         self.assertEqual(await self.status(), {
             "providers": [
-                {"id": "openai", "name": "OpenAI", "configured": False, "source": None, "default_model": None},
-                {"id": "anthropic", "name": "Anthropic", "configured": False, "source": None, "default_model": None},
+                {"id": "openai", "name": "OpenAI", "configured": False, "source": None, "default_model": None,
+                 "kind": "openai", "base_url": "https://api.openai.com/v1", "is_local": False, "allow_routing": False, "allowed_models": []},
+                {"id": "anthropic", "name": "Anthropic", "configured": False, "source": None, "default_model": None,
+                 "kind": "anthropic", "base_url": "https://api.anthropic.com/v1", "is_local": False, "allow_routing": False, "allowed_models": []},
             ],
             "keyring_available": True, "default_provider": None, "onboarding_dismissed": False,
+            "routing": {"mode": "local_only", "providers": []},
         })
 
     async def test_environment_detection_precedence_and_settings_only(self):
@@ -99,6 +102,24 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.status_code, 200, response.text)
             self.assert_secret_free(response)
             self.assertEqual(self.vault["openai"], OTHER_SECRET)
+
+    async def test_key_only_setup_and_returning_to_automatic_models(self):
+        for provider in ("openai", "anthropic"):
+            with self.subTest(provider=provider):
+                response = await self.client.put(f"/api/providers/{provider}", json={
+                    "api_key": SECRET, "storage": "session"})
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assert_secret_free(response)
+                status = await self.status()
+                row = next(item for item in status["providers"] if item["id"] == provider)
+                self.assertTrue(row["configured"])
+                self.assertIsNone(row["default_model"])
+                self.assertEqual(status["default_provider"], provider)
+                self.assertEqual(status["routing"]["providers"], [], "Saving a key does not grant extra routing permissions")
+                await self.save(provider, model="gpt-test")
+                response = await self.client.put(f"/api/providers/{provider}", json={"model": "", "storage": "session"})
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertNotIn(provider, self.settings._load()["models"])
 
     async def test_lifecycle_session_default_skip_and_remove(self):
         response = await self.save()
@@ -298,7 +319,7 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
             {"api_key": " " + SECRET},
             {"api_key": "x" * 4097},
             {"api_key": ""},
-            {"model": ""}, {"model": "x" * 201}, {"model": "bad model"},
+            {"model": "x" * 201}, {"model": "bad model"},
         ]
         for overrides in bodies:
             with self.subTest(overrides=list(overrides)):
@@ -519,7 +540,8 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
             for future in futures:
                 future.result()
         raw = json.loads(self.path.read_text())
-        self.assertEqual(raw, {"models": {"openai": "gpt-test", "anthropic": "claude-test"}, "default_provider": "openai", "onboarding_dismissed": True})
+        self.assertEqual(raw, {"models": {"openai": "gpt-test", "anthropic": "claude-test"}, "default_provider": "openai", "onboarding_dismissed": True,
+                               "profiles": {}, "routing": {"mode": "local_only", "providers": []}})
 
 
 if __name__ == "__main__":

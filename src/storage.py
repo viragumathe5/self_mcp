@@ -6,7 +6,12 @@ Stored at ~/.self_mcp/data.json
 Auto-migrates old single-store format on first load.
 """
 import json
+import fcntl
+from functools import wraps
+import os
 import re
+import tempfile
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,6 +20,28 @@ from typing import Optional
 DATA_DIR = Path.home() / ".self_mcp"
 DATA_FILE = DATA_DIR / "data.json"
 TOKEN_LIMIT = 2000
+_MUTEX = threading.RLock()
+_TRANSACTION = threading.local()
+
+
+def _serialized(operation):
+    """Lock the entire read/change/write, including nested storage calls."""
+    @wraps(operation)
+    def wrapped(*args, **kwargs):
+        with _MUTEX:
+            if getattr(_TRANSACTION, "active", False):
+                return operation(*args, **kwargs)
+            DATA_FILE.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            fd = os.open(DATA_FILE.with_suffix(".lock"), os.O_CREAT | os.O_RDWR, 0o600)
+            with os.fdopen(fd, "a") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                _TRANSACTION.active = True
+                try:
+                    return operation(*args, **kwargs)
+                finally:
+                    _TRANSACTION.active = False
+                    fcntl.flock(lock, fcntl.LOCK_UN)
+    return wrapped
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -38,6 +65,7 @@ def _now() -> str:
 
 # ── load / save ───────────────────────────────────────────────────────────────
 
+@_serialized
 def _load() -> dict:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     if not DATA_FILE.exists():
@@ -57,8 +85,21 @@ def _load() -> dict:
     return raw
 
 
+@_serialized
 def _save(data: dict) -> None:
-    DATA_FILE.write_text(json.dumps(data, indent=2))
+    # Readers see either the complete old file or the complete new file.
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=DATA_FILE.parent,
+                                         prefix=f".{DATA_FILE.name}.", delete=False) as stream:
+            temporary = Path(stream.name)
+            json.dump(data, stream, indent=2)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, DATA_FILE)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def _new_store(name: str, description: str = "") -> dict:
@@ -104,6 +145,7 @@ def get_store_by_slug(slug: str) -> Optional[dict]:
     return next((s for s in _load()["stores"] if s["slug"] == slug), None)
 
 
+@_serialized
 def create_store(name: str, description: str = "") -> dict:
     data = _load()
     slug = _slug(name)
@@ -121,6 +163,7 @@ def create_store(name: str, description: str = "") -> dict:
     return _store_summary(store)
 
 
+@_serialized
 def update_store(store_id: str, name: str, description: str = "") -> Optional[dict]:
     data = _load()
     for s in data["stores"]:
@@ -132,6 +175,7 @@ def update_store(store_id: str, name: str, description: str = "") -> Optional[di
     return None
 
 
+@_serialized
 def delete_store(store_id: str) -> bool:
     data = _load()
     before = len(data["stores"])
@@ -167,6 +211,7 @@ def get_document(store_id: str, doc_id: str) -> Optional[dict]:
     return next((d for d in list_documents(store_id) if d["id"] == doc_id), None)
 
 
+@_serialized
 def create_document(store_id: str, title: str, content: str, tags: list[str] = []) -> dict:
     tokens = count_tokens(content)
     if tokens > TOKEN_LIMIT:
@@ -189,6 +234,7 @@ def create_document(store_id: str, title: str, content: str, tags: list[str] = [
     return doc
 
 
+@_serialized
 def update_document(store_id: str, doc_id: str, title: str, content: str, tags: list[str] = []) -> Optional[dict]:
     tokens = count_tokens(content)
     if tokens > TOKEN_LIMIT:
@@ -206,6 +252,7 @@ def update_document(store_id: str, doc_id: str, title: str, content: str, tags: 
     return None
 
 
+@_serialized
 def delete_document(store_id: str, doc_id: str) -> bool:
     data = _load()
     store = next((s for s in data["stores"] if s["id"] == store_id), None)
@@ -226,6 +273,7 @@ def list_links(store_id: str) -> list[dict]:
     return s["links"] if s else []
 
 
+@_serialized
 def create_link(store_id: str, title: str, url: str, description: str = "", tags: list[str] = []) -> dict:
     data = _load()
     store = next((s for s in data["stores"] if s["id"] == store_id), None)
@@ -244,6 +292,7 @@ def create_link(store_id: str, title: str, url: str, description: str = "", tags
     return link
 
 
+@_serialized
 def delete_link(store_id: str, link_id: str) -> bool:
     data = _load()
     store = next((s for s in data["stores"] if s["id"] == store_id), None)
@@ -284,6 +333,7 @@ def get_issue(store_id: str, issue_id: str) -> Optional[dict]:
     return next((i for i in list_issues(store_id) if i["id"] == issue_id), None)
 
 
+@_serialized
 def create_issue(
     store_id: str,
     title: str,
@@ -315,6 +365,7 @@ def create_issue(
     return issue
 
 
+@_serialized
 def update_issue(
     store_id: str,
     issue_id: str,
@@ -343,6 +394,7 @@ def update_issue(
     return None
 
 
+@_serialized
 def set_issue_assignment(
     store_id: str,
     issue_id: str,
@@ -364,6 +416,7 @@ def set_issue_assignment(
     return None
 
 
+@_serialized
 def delete_issue(store_id: str, issue_id: str) -> bool:
     data = _load()
     store = next((s for s in data["stores"] if s["id"] == store_id), None)
@@ -394,6 +447,7 @@ def get_plan(store_id: str, plan_id: str) -> Optional[dict]:
     return next((p for p in list_plans(store_id) if p["id"] == plan_id), None)
 
 
+@_serialized
 def create_plan(
     store_id: str,
     title: str,
@@ -450,6 +504,7 @@ def create_plan(
     return plan
 
 
+@_serialized
 def update_plan_status(store_id: str, plan_id: str, status: str) -> Optional[dict]:
     data = _load()
     store = next((s for s in data["stores"] if s["id"] == store_id), None)
@@ -464,6 +519,7 @@ def update_plan_status(store_id: str, plan_id: str, status: str) -> Optional[dic
     return None
 
 
+@_serialized
 def set_plan_final_output(store_id: str, plan_id: str, output: str) -> Optional[dict]:
     data = _load()
     store = next((s for s in data["stores"] if s["id"] == store_id), None)
@@ -495,6 +551,7 @@ def get_next_subtask(store_id: str, plan_id: str) -> Optional[dict]:
     return None
 
 
+@_serialized
 def claim_subtask(store_id: str, plan_id: str, subtask_id: str, agent_name: str = "agent") -> Optional[dict]:
     """Mark a subtask as in_progress and record the agent."""
     data = _load()
@@ -514,6 +571,7 @@ def claim_subtask(store_id: str, plan_id: str, subtask_id: str, agent_name: str 
     return None
 
 
+@_serialized
 def complete_subtask(
     store_id: str,
     plan_id: str,
@@ -540,6 +598,7 @@ def complete_subtask(
     return None
 
 
+@_serialized
 def set_subtask_doc(store_id: str, plan_id: str, subtask_id: str, doc_id: str) -> bool:
     """Record the context document id for a subtask."""
     data = _load()
@@ -556,6 +615,7 @@ def set_subtask_doc(store_id: str, plan_id: str, subtask_id: str, doc_id: str) -
     return False
 
 
+@_serialized
 def delete_plan(store_id: str, plan_id: str) -> bool:
     data = _load()
     store = next((s for s in data["stores"] if s["id"] == store_id), None)

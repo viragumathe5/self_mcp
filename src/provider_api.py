@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 from starlette.concurrency import run_in_threadpool
 
 import providers
+import provider_transport
 
 
 settings = providers.ProviderSettings()
@@ -90,12 +91,45 @@ class TestInput(ProviderInput):
 
 class SaveInput(TestInput):
     storage: Literal["session", "keyring"]
-    model: str = Field(min_length=1, max_length=200, pattern=f"^{providers.MODEL_PATTERN}$")
+    model: str = Field(default="", max_length=200)
     make_default: bool = True
 
 
 class OnboardingInput(ProviderInput):
     dismissed: bool
+
+
+class ProfileInput(ProviderInput):
+    name: str = Field(min_length=1, max_length=80)
+    kind: Literal["ollama", "openai_compatible"]
+    base_url: str = Field(min_length=1, max_length=2048)
+    api_key: SecretStr | None = Field(default=None, max_length=4096)
+    storage: Literal["session", "keyring"]
+    model: str = Field(default="", max_length=200)
+    make_default: bool = False
+    context_tokens: int = Field(default=8192, ge=2, le=2_000_000)
+    output_tokens: int = Field(default=2048, ge=1, lt=2_000_000)
+    requires_key: bool = False
+    allowed_models: list[str] = Field(default_factory=list, max_length=50)
+
+    def fields(self):
+        return {**self.model_dump(exclude={"api_key"}),
+                "api_key": self.api_key.get_secret_value() if self.api_key else None}
+
+
+class ProfileUpdateInput(ProfileInput):
+    clear_api_key: bool = False
+
+    def fields(self):
+        fields = super().fields()
+        if "allowed_models" not in self.model_fields_set:
+            fields.pop("allowed_models")
+        return fields
+
+
+class RoutingInput(ProviderInput):
+    mode: Literal["local_only", "local_first", "balanced", "quality"]
+    providers: list[str] = Field(max_length=20)
 
 
 @router.get("")
@@ -108,8 +142,39 @@ def dismiss_onboarding(body: OnboardingInput):
     return settings.dismiss(body.dismissed)
 
 
+@router.post("/profiles")
+def create_profile(body: ProfileInput):
+    return settings.save_profile(**body.fields())
+
+
+@router.post("/profiles/test")
+async def test_unsaved_profile(body: ProfileInput):
+    profile = await run_in_threadpool(settings.prepare_profile, **body.fields())
+    connection = {key: profile[key] for key in ("kind", "base_url", "is_local", "context_tokens", "output_tokens", "requires_key", "allowed_models")}
+    connection.update(id=None, api_key=body.api_key.get_secret_value() if body.api_key else None)
+    return await provider_transport.discover(connection)
+
+
+@router.put("/profiles/{provider_id}")
+def update_profile(provider_id: str, body: ProfileUpdateInput):
+    return settings.save_profile(provider_id=provider_id, **body.fields())
+
+
+@router.get("/routing")
+def get_routing():
+    return settings.routing()
+
+
+@router.put("/routing")
+def save_routing(body: RoutingInput):
+    return settings.save_routing(body.mode, body.providers)
+
+
 @router.post("/{provider}/test")
 async def test_provider(provider: str, body: TestInput):
+    if provider not in providers.PROVIDERS:
+        connection = await run_in_threadpool(settings._connection, provider, body.api_key.get_secret_value() if body.api_key else None)
+        return await provider_transport.discover(connection)
     providers.validate_provider(provider)
     credential = body.api_key.get_secret_value() if body.api_key is not None else (await run_in_threadpool(settings.resolve, provider))[0]
     if not credential:

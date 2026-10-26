@@ -220,3 +220,8 @@ __marimo__/
 
 # Agents
 AGENTS.md
+
+# Local desktop and presentation build files
+.DS_Store
+node_modules/
+presentations/**/.build/

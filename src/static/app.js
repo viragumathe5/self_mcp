@@ -2,6 +2,54 @@
 const TOKEN_LIMIT = 2000;
 if (window.marked) marked.setOptions({ breaks: true, gfm: true });
 
+// Copy an absolute URL, including http://; localhost-only service shares the GUI port.
+function projectMcpUrl(slug) {
+  const url = new URL(`/mcp/${encodeURIComponent(slug)}/mcp`, location.origin);
+  if (url.hostname === 'localhost') url.hostname = '127.0.0.1';
+  return url.href;
+}
+function openCodeEntry(slug) {
+  return { type: 'remote', url: projectMcpUrl(slug), enabled: true, oauth: false, timeout: 10000 };
+}
+
+async function checkMcpHealth() {
+  const status = document.getElementById('mcp-server-status');
+  try {
+    const response = await fetch('/mcp/health', { cache: 'no-store', signal: AbortSignal.timeout(5000) });
+    if (!response.ok || await response.text() !== 'ok') throw new Error();
+    status.textContent = 'Workspace + MCP ready';
+    status.parentElement.dataset.state = 'ready';
+  } catch {
+    status.textContent = 'MCP unavailable';
+    status.parentElement.dataset.state = 'offline';
+  }
+}
+
+async function testProjectMcp(slug, button) {
+  const status = button.closest('.project-cfg-row').querySelector('.mcp-connection-status');
+  button.disabled = true;
+  status.textContent = 'Checking connection…';
+  try {
+    const url = `/mcp/${encodeURIComponent(slug)}/mcp`;
+    async function rpc(id, method, params) {
+      const response = await fetch(url, { method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' },
+        body: JSON.stringify({ jsonrpc: '2.0', id, method, ...(params ? { params } : {}) }),
+        signal: AbortSignal.timeout(10000) });
+      if (!response.ok) throw new Error(response.status === 404 ? 'Project endpoint not found. Refresh this page.' : `Connection failed (HTTP ${response.status}).`);
+      const data = await response.json();
+      if (data.error || !data.result) throw new Error('The MCP handshake failed. Restart self_mcp and try again.');
+      return data.result;
+    }
+    await rpc(1, 'initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'self_mcp-setup', version: '1' } });
+    const catalog = await rpc(2, 'tools/list');
+    if (!Array.isArray(catalog.tools)) throw new Error('The server did not return its tools.');
+    status.textContent = `Connected · ${catalog.tools.length} tools available. Copy the config into OpenCode.`;
+  } catch (error) {
+    status.textContent = error.message || 'Could not connect. Run .venv/bin/python start.py and try again.';
+  } finally { button.disabled = false; }
+}
+
 // ── State ───────────────────────────────────────────────────────────────────
 let _currentProject    = null;
 let _currentProjectTab = 'docs';
@@ -287,7 +335,7 @@ async function loadProjects() {
         <div class="project-stat"><i data-lucide="zap" style="width:10px;height:10px"></i><strong>${s.total_tokens}</strong> tokens</div>
       </div>
       <div class="project-footer">
-        <span class="project-sse"><i data-lucide="radio" style="width:10px;height:10px"></i>localhost:8001/${esc(s.slug)}/sse</span>
+        <span class="project-sse"><i data-lucide="radio" style="width:10px;height:10px"></i>${esc(projectMcpUrl(s.slug))}</span>
         <button class="btn btn-ghost btn-xs" onclick="event.stopPropagation();copyProjectConfig(${inlineArg(s.slug)},${inlineArg(s.name)})" title="Copy config">
           <i data-lucide="clipboard-copy" style="width:11px;height:11px"></i>
         </button>
@@ -319,7 +367,7 @@ function showProjectTab(tab, pushHistory = true) {
   } else if (tab === 'links') {
     acts.innerHTML = `<button class="btn btn-primary btn-sm" onclick="openLinkModal()"><i data-lucide="plus" style="width:13px;height:13px"></i> Save Link</button>`;
   } else if (tab === 'tasks') {
-    acts.innerHTML = `<button class="btn btn-primary btn-sm" onclick="TasksUI.focusGoal()">New task</button>`;
+    acts.replaceChildren();
   } else {
     acts.innerHTML = `<button class="btn btn-primary btn-sm" onclick="openIssueModal()"><i data-lucide="plus" style="width:13px;height:13px"></i> New Issue</button>`;
   }
@@ -386,7 +434,7 @@ function renderRightPanel(docs, links) {
   document.getElementById('rp-fill').style.width   = Math.min(100, (total / max) * 100) + '%';
   document.getElementById('rp-budget-lbl').textContent = `${total} / ${max}`;
   document.getElementById('rp-endpoint').textContent   =
-    _currentProject ? `localhost:8001/${_currentProject.slug}/sse` : '—';
+    _currentProject ? projectMcpUrl(_currentProject.slug) : '—';
   const list = document.getElementById('rp-doc-list');
   if (!docs.length) {
     list.innerHTML = '<div style="font-size:11px;color:var(--text3)">No documents yet</div>';
@@ -401,7 +449,7 @@ function renderRightPanel(docs, links) {
 
 function copyProjectSSE() {
   if (!_currentProject) return;
-  copy(`http://localhost:8001/${_currentProject.slug}/sse`, 'SSE URL copied');
+  copy(projectMcpUrl(_currentProject.slug), 'MCP URL copied');
 }
 
 // ── Doc editor ────────────────────────────────────────────────────────────────
@@ -633,6 +681,7 @@ async function loadSetup() {
   const projects = await apiFetch('/api/stores');
   if (!projects) return;
   _setupProjects = projects;
+  checkMcpHealth();
   const list = document.getElementById('setup-projects-list');
   if (!projects.length) {
     list.innerHTML = '<p style="font-size:13px;color:var(--text3)">No projects yet — create one first.</p>';
@@ -641,10 +690,12 @@ async function loadSetup() {
       <div class="project-cfg-row">
         <div>
           <div style="font-weight:600;font-size:13px;color:var(--text)">${esc(s.name)}</div>
-          <code style="font-family:var(--mono);font-size:10px;color:var(--text3)">localhost:8001/${esc(s.slug)}/sse</code>
+          <code style="font-family:var(--mono);font-size:10px;color:var(--text3);overflow-wrap:anywhere">${esc(projectMcpUrl(s.slug))}</code>
+          <p class="mcp-connection-status task-help" role="status"></p>
         </div>
-        <div style="display:flex;gap:5px;flex-shrink:0">
-          <button class="btn btn-secondary btn-xs" onclick="copy(${inlineArg(`http://localhost:8001/${s.slug}/sse`)},'SSE URL copied')">
+        <div style="display:flex;gap:5px;flex-wrap:wrap;flex-shrink:0">
+          <button class="btn btn-secondary btn-xs" onclick="testProjectMcp(${inlineArg(s.slug)},this)">Test connection</button>
+          <button class="btn btn-secondary btn-xs" onclick="copy(${inlineArg(projectMcpUrl(s.slug))},'MCP URL copied')">
             <i data-lucide="link" style="width:10px;height:10px"></i> URL
           </button>
           <button class="btn btn-secondary btn-xs" onclick="copyProjectConfig(${inlineArg(s.slug)},${inlineArg(s.name)})">
@@ -674,19 +725,16 @@ function renderConfigOutput() {
   }
   let out = '', note = '';
   if (_configFormat === 'opencode') {
-    const entries = projects.map(s =>
-      `    "self_mcp_${s.slug}": {\n      "type": "remote",\n      "url": "http://localhost:8001/${s.slug}/sse",\n      "enabled": true\n    }`
-    ).join(',\n');
-    out  = `{\n  "mcp": {\n${entries}\n  }\n}`;
-    note = 'Merge the "mcp" block into ~/.config/opencode/opencode.json';
+    out = JSON.stringify({ mcp: Object.fromEntries(projects.map(s => [`self_mcp_${s.slug}`, openCodeEntry(s.slug)])) }, null, 2);
+    note = 'Merge into ~/.config/opencode/opencode.json. Keep self_mcp running, then restart OpenCode. If still disabled, check for a project-level opencode.json override.';
   } else if (_configFormat === 'claude') {
     const entries = projects.map(s =>
-      `    "self_mcp_${s.slug}": { "url": "http://localhost:8001/${s.slug}/sse" }`
+      `    "self_mcp_${s.slug}": { "url": "${projectMcpUrl(s.slug)}" }`
     ).join(',\n');
     out  = `{\n  "mcpServers": {\n${entries}\n  }\n}`;
     note = 'Merge into claude_desktop_config.json, then restart Claude Desktop.';
   } else {
-    out  = projects.map(s => `http://localhost:8001/${s.slug}/sse`).join('\n');
+    out  = projects.map(s => projectMcpUrl(s.slug)).join('\n');
     note = 'In Cursor: Settings → MCP → add each URL as a separate remote server.';
   }
   document.getElementById('cfg-output').textContent = out;
@@ -701,7 +749,7 @@ function copyGeneratedConfig() {
 }
 
 function copyProjectConfig(slug, name) {
-  const snippet = `"self_mcp_${slug}": {\n  "type": "remote",\n  "url": "http://localhost:8001/${slug}/sse",\n  "enabled": true\n}`;
+  const snippet = JSON.stringify({ mcp: { [`self_mcp_${slug}`]: openCodeEntry(slug) } }, null, 2);
   navigator.clipboard.writeText(snippet);
   toast(`Config for "${name}" copied`);
 }
@@ -928,6 +976,7 @@ document.addEventListener('keydown', e => {
 
 // ── Init — boot from current URL ──────────────────────────────────────────────
 (function init() {
+  checkMcpHealth();
   // Restore theme from localStorage
   const saved = localStorage.getItem('self_mcp_theme') || 'dark';
   applyTheme(saved);

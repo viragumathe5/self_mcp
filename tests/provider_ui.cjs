@@ -1,6 +1,5 @@
 /* Run with PLAYWRIGHT_MODULE set to an installed playwright package if needed. */
 const assert = require('node:assert/strict');
-const http = require('node:http');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
@@ -85,16 +84,16 @@ async function checkOnboarding(browser, base) {
   assert.equal(scrollable, true, 'Short viewports must allow scrolling to all fields');
 
   await page.locator('#provider-key').fill('bad-test-key');
-  await page.locator('#provider-test').click();
+  await page.locator('#provider-save').click();
   await page.waitForFunction(() => document.querySelector('#provider-test-status').textContent.includes('authentication failed'));
+  assert.equal(calls.some(call => call.method === 'PUT'), false);
   await page.locator('#provider-key').fill('safe-fixture-key');
-  await page.locator('#provider-test').click();
-  await page.waitForSelector('#provider-models option', { state: 'attached' });
-  await page.locator('#provider-model').fill('test-model');
   await page.locator('#provider-save').click();
   await page.waitForFunction(() => !document.querySelector('#provider-dialog').open);
   assert.equal(await page.locator('#provider-key').inputValue(), '');
   assert.equal(status.default_provider, 'openai');
+  assert.equal(calls.find(call => call.method === 'PUT').body.model, '', 'A new user needs no model name');
+  assert.equal(calls.filter(call => call.path.endsWith('/test')).length, 2);
   assert.equal(status.providers[0].source, 'session');
   assert.equal(calls.filter(call => call.method === 'PUT').length, 1);
   assert.equal(await page.evaluate(() => JSON.stringify(localStorage).includes('safe-fixture-key')), false);
@@ -156,29 +155,16 @@ async function checkSkipAndEnvironment(browser, base) {
 }
 
 async function main() {
-  const server = http.createServer(async (request, response) => {
-    const pathname = new URL(request.url, 'http://localhost').pathname;
-    const filename = pathname.startsWith('/static/') ? path.basename(pathname) : 'index.html';
-    try {
-      const body = await fs.readFile(path.join(staticRoot, filename));
-      const types = { '.js': 'application/javascript', '.css': 'text/css', '.html': 'text/html' };
-      response.writeHead(200, { 'Content-Type': types[path.extname(filename)] || 'text/plain' });
-      response.end(body);
-    } catch {
-      response.writeHead(404).end();
-    }
-  });
-  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-  const base = `http://127.0.0.1:${server.address().port}`;
+  const base = 'http://127.0.0.1:8000'; // Intercepted; no server or listening socket.
   let browser;
   try {
     browser = await chromium.launch({ headless: true, executablePath: process.env.CHROME_PATH });
+    await require('./browser_fixture.cjs').interceptFiles(browser, base);
     await checkOnboarding(browser, base);
     await checkSkipAndEnvironment(browser, base);
     console.log('Provider UI checks passed: setup, test errors, save, clear secrets, remove, skip, environment detection, mobile scrolling, existing tabs.');
   } finally {
     if (browser) await browser.close();
-    await new Promise(resolve => server.close(resolve));
   }
 }
 

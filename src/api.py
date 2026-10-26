@@ -374,6 +374,9 @@ You are working on one part of a larger plan. Your job is **only** this subtask.
 
 # ── static / GUI ──────────────────────────────────────────────────────────────
 
+from mcp_server import asgi_app as mcp_app
+app.mount("/mcp", mcp_app, name="mcp")
+
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 @app.get("/", include_in_schema=False)

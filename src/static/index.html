@@ -40,8 +40,8 @@
     </div>
     <div class="sidebar-footer">
       <div>
-        <div class="status-row"><span class="status-dot"></span> MCP active</div>
-        <div class="status-url">localhost:8001/&lt;slug&gt;/sse</div>
+        <div class="status-row" data-state="checking"><span class="status-dot"></span><span id="mcp-server-status">Checking MCP…</span></div>
+        <div class="status-url">One local service · port 8000</div>
       </div>
       <button class="theme-toggle" id="theme-toggle-btn" onclick="toggleTheme()" title="Toggle light/dark">
         <i data-lucide="sun" style="width:14px;height:14px" id="theme-icon"></i>
@@ -64,6 +64,7 @@
         </button>
       </div>
       <div class="content">
+        <div class="workspace-intro"><h2>Your work, in one place.</h2><p>Keep reference material in a project, then give your AI team a task.</p></div>
         <div id="projects-grid" class="projects-grid"></div>
         <div id="projects-empty" class="empty" style="display:none">
           <div class="empty-icon"><i data-lucide="archive" style="width:48px;height:48px"></i></div>
@@ -136,7 +137,7 @@
             <div class="rp-url-box"><code id="rp-endpoint">—</code></div>
             <div style="margin-top:6px;">
               <button class="btn btn-secondary btn-xs" style="width:100%" onclick="copyProjectSSE()">
-                <i data-lucide="copy" style="width:11px;height:11px"></i> Copy SSE URL
+                <i data-lucide="copy" style="width:11px;height:11px"></i> Copy MCP URL
               </button>
             </div>
           </div>
@@ -169,68 +170,113 @@
 
       <div id="project-view-tasks" style="display:none">
         <div class="content task-workspace">
-          <div class="task-intro">
-            <h2>From a goal to a reviewed draft</h2>
-            <p>A lead model plans the work, smaller workers draft independent subtasks, and the lead reviews and combines their outputs. Rejected work is revised within your limit.</p>
-            <p class="task-notice">Text and code generation only: agents cannot execute code, run VQE simulations, browse, or modify your files. Model review is not experimental verification. Only the goal and generated task context are sent; project documents are not automatically attached.</p>
+          <div class="task-workspace-bar">
+            <div><h2>Workspace</h2><span class="task-help">One task. Keep building with each message.</span></div>
+            <div class="task-workspace-tools">
+              <label for="task-saved-run">Saved task</label>
+              <select id="task-saved-run" class="form-input" aria-label="Saved task"><option value="">Loading…</option></select>
+              <button type="button" class="btn btn-ghost btn-sm" id="task-more-runs" hidden>Load older tasks</button>
+              <button type="button" class="btn btn-ghost btn-sm" id="task-refresh">Refresh status</button>
+            </div>
           </div>
           <div class="task-columns">
-            <aside class="task-controls">
-              <form id="task-run-form" class="setup-card">
-                <h3>Give the team a task</h3>
-                <div class="form-field">
-                  <label for="task-goal">Goal and acceptance criteria</label>
-                  <textarea class="form-input" id="task-goal" rows="6" maxlength="12000" required placeholder="Example: Design a VQE experiment for H₂. Explain the Hamiltonian and ansatz, draft Python code, and identify tests and assumptions. Do not invent simulation results."></textarea>
+            <div class="task-main">
+              <section class="task-results" aria-label="Current task">
+                <div id="task-empty-state" class="task-empty-state">
+                  <span class="task-eyebrow">ROOM TO THINK</span>
+                  <h3>What are we working on?</h3>
+                  <p>Get an answer from one model, or delegate a goal to your team.</p>
                 </div>
-                <div class="form-field">
-                  <label for="task-provider">Provider</label>
+                <div id="task-run-detail"></div>
+              </section>
+              <form id="task-run-form" class="task-composer">
+                <div class="task-live-status" aria-label="Task progress">
+                  <p id="task-run-status" role="status" aria-live="polite"></p>
+                  <div id="task-run-actions" class="task-run-actions" hidden>
+                    <span id="task-state-badge"></span>
+                    <button type="button" id="task-details-open" class="task-progress-link" aria-haspopup="dialog" aria-controls="task-details-panel">Work details →</button>
+                    <button type="button" id="task-cancel" class="btn btn-ghost btn-sm" hidden>Cancel run</button>
+                  </div>
+                  <p id="task-usage-summary" class="task-help" hidden></p>
+                  <details id="task-run-problem" class="task-run-problem" hidden>
+                    <summary>Why this stopped</summary>
+                    <p id="task-run-error"></p>
+                    <p id="task-run-recovery" class="task-help"></p>
+                  </details>
+                </div>
+                <p id="task-conversation-hint" class="task-help">A new task starts with this message.</p>
+                <div class="task-composer-top">
+                  <label class="sr-only" for="task-mode">Request mode</label>
+                  <select id="task-mode" class="form-input"><option value="delegate">Delegate a task</option><option value="direct">Ask a model</option></select>
+                  <span id="task-mode-help" class="task-help">Plan, draft, and review</span>
+                </div>
+                <label for="task-goal" class="sr-only">What should the model deliver?</label>
+                <textarea class="form-input" id="task-goal" rows="3" maxlength="12000" required placeholder="Describe what you need…"></textarea>
+                <div class="task-composer-options">
+                  <label for="task-provider" class="sr-only">AI connection</label>
                   <select id="task-provider" class="form-input" required><option value="">Loading providers…</option></select>
-                  <p id="task-provider-status" role="status"></p>
-                  <a href="/providers" id="task-provider-settings">Manage provider access</a>
+                  <label class="task-consent"><input type="checkbox" id="task-project-context"><span>Project knowledge</span></label>
                 </div>
-                <button type="button" class="btn btn-secondary btn-sm" id="task-load-models">Load accessible models</button>
-                <p id="task-model-status" role="status" aria-live="polite">Automatic model selection runs when you start. Load models to inspect or override the recommendation.</p>
-                <div class="form-field">
-                  <label for="task-lead-model">Lead: planner, reviewer, and synthesizer</label>
-                  <select id="task-lead-model" class="form-input"><option value="">Automatic lead selection</option></select>
+                <div id="task-direct-model-row" class="task-direct-model" hidden>
+                  <label for="task-direct-model">Model</label>
+                  <select id="task-direct-model" class="form-input"><option value="">Automatic selection</option></select>
+                  <button type="button" id="task-direct-load" class="btn btn-ghost btn-sm">Load models</button>
                 </div>
-                <div class="form-field">
-                  <label for="task-worker-model">Workers: subtask generation</label>
-                  <select id="task-worker-model" class="form-input"><option value="">Automatic smaller-model selection</option></select>
-                </div>
-                <p class="task-help">Selection uses model-family and version heuristics, not a universal “best model” or price guarantee. All roles use the selected provider. Copilot authentication is not supported in this version.</p>
-                <div class="task-limits">
-                  <div class="form-field">
-                    <label for="task-max-tasks">Maximum subtasks</label>
-                    <input id="task-max-tasks" class="form-input" type="number" min="1" max="8" value="6" required>
+                <p id="task-direct-status" class="task-help" role="status" hidden></p>
+                <p id="task-provider-status" role="status"></p>
+                <details id="task-advanced" class="task-advanced">
+                  <summary>Settings <span>Models &amp; limits</span></summary>
+                  <div class="task-advanced-body">
+                    <a href="/providers" id="task-provider-settings">Manage connections</a>
+                    <p class="task-help">Automatic selection can use approved alternatives. A selected model stays pinned. Project knowledge retrieves relevant passages from this project's documents, saved results and link descriptions. URLs aren't fetched.</p>
+                    <button type="button" class="btn btn-secondary btn-sm" id="task-load-models">Load accessible models</button>
+                    <p id="task-model-status" role="status" aria-live="polite"></p>
+                    <div id="task-delegate-settings">
+                      <div class="task-limits">
+                        <div class="form-field"><label for="task-lead-model">Lead model</label><select id="task-lead-model" class="form-input"><option value="">Automatic lead selection</option></select></div>
+                        <div class="form-field"><label for="task-worker-model">Worker model</label><select id="task-worker-model" class="form-input"><option value="">Automatic selection for each task</option></select></div>
+                        <div class="form-field"><label for="task-max-tasks">Maximum subtasks</label><input id="task-max-tasks" class="form-input" type="number" min="1" max="8" value="6" required></div>
+                        <div class="form-field"><label for="task-max-revisions">Revision rounds · after first draft</label><input id="task-max-revisions" class="form-input" type="number" min="0" max="3" value="2" required></div>
+                      </div>
+                      <label class="task-consent"><input type="checkbox" id="task-schema-repair" checked> Correct an invalid plan or review once</label>
+                    </div>
+                    <div class="task-limits">
+                      <div class="form-field"><label for="task-timeout">Call timeout · seconds</label><input id="task-timeout" class="form-input" type="number" min="30" max="600" placeholder="Model default"></div>
+                      <div class="form-field"><label for="task-output-budget">Output token budget</label><input id="task-output-budget" class="form-input" type="number" min="256" max="32768" placeholder="Model default"></div>
+                      <div class="form-field"><label for="task-reasoning">Reasoning effort</label><select id="task-reasoning" class="form-input"><option value="auto">Automatic</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select></div>
+                    </div>
+                    <p class="task-help">Defaults adapt to supported models. Custom connections also enforce their configured token limits. Longer reasoning and larger outputs may cost more. Up to two calls at once, 37 calls and 15 minutes per message. The last review delivers a draft with any remaining concerns. Project knowledge: up to 1,500 context tokens per call, reduced when space is limited.</p>
                   </div>
-                  <div class="form-field">
-                    <label for="task-max-revisions">Revision rounds</label>
-                    <input id="task-max-revisions" class="form-input" type="number" min="0" max="3" value="2" required>
-                  </div>
+                </details>
+                <div class="task-composer-footer">
+                  <label class="task-consent"><input type="checkbox" id="task-cost-consent" required><span>Allow this request and attached knowledge to be sent. Hosted usage may cost money.</span></label>
+                  <button type="submit" class="btn btn-primary" id="task-submit" disabled>Start task</button>
                 </div>
-                <p class="task-help">At most two model calls run simultaneously across the server. Each run stops after 15 minutes or its revision limit. Token and call limits do not guarantee a fixed dollar cost.</p>
-                <label class="task-consent"><input type="checkbox" id="task-cost-consent" required> I understand that starting sends this goal to my provider and begins billable model calls.</label>
-                <button type="submit" class="btn btn-primary" id="task-submit" disabled>Start task</button>
+                <p class="task-help task-draft-note">Saved answers and worker drafts are shared through this project's MCP. Code isn't executed. ⌘/Ctrl + Enter to send.</p>
                 <p id="task-submit-status" role="status" aria-live="polite"></p>
                 <div id="task-uncertain-actions" hidden>
-                  <button type="button" class="btn btn-secondary btn-sm" id="task-reconcile">Check recent runs</button>
+                  <button type="button" class="btn btn-secondary btn-sm" id="task-reconcile">Check task status</button>
                   <button type="button" class="btn btn-danger btn-sm" id="task-allow-retry">Allow another submission</button>
                 </div>
               </form>
-              <section class="setup-card task-history">
-                <div class="task-section-heading"><h3>Recent runs</h3><button type="button" class="btn btn-secondary btn-xs" id="task-history-refresh">Refresh</button></div>
-                <p class="task-help">Latest 50 runs for this project. Leaving this tab does not cancel running work.</p>
-                <p id="task-history-status" role="status" aria-live="polite"></p>
-                <div id="task-history-list"></div>
-              </section>
-            </aside>
-            <section class="task-results" aria-label="Selected task run">
-              <p id="task-run-status" role="status" aria-live="polite">Submit a goal or select a previous run to see the breakdown.</p>
-              <div id="task-run-detail"></div>
-            </section>
+            </div>
           </div>
         </div>
+        <dialog id="task-details-panel" class="task-details-panel" aria-labelledby="task-details-title">
+          <div class="task-details-heading"><h3 id="task-details-title">Run details</h3><button type="button" class="btn btn-ghost btn-sm" id="task-details-close" aria-label="Close run details">Close</button></div>
+          <div id="task-details-content"></div>
+          <details id="task-pricing" class="task-disclosure">
+            <summary>Cost estimate settings</summary>
+            <p class="task-help">Enter your connection's USD prices per million tokens. Estimates use these prices for all recorded calls in this project, including past calls. Cached-token discounts, fees, and provider invoice adjustments are not included. Missing prices are never treated as free usage.</p>
+            <form id="task-pricing-form" class="task-pricing-form">
+              <label>Connection / model<select id="task-price-model" class="form-input" required></select></label>
+              <label>Input · USD per million tokens<input id="task-price-input" class="form-input" type="number" min="0" max="1000000" step="any" required></label>
+              <label>Output · USD per million tokens<input id="task-price-output" class="form-input" type="number" min="0" max="1000000" step="any" required></label>
+              <button id="task-price-save" type="submit" class="btn btn-secondary btn-sm">Save prices</button>
+            </form>
+            <p id="task-price-status" class="task-help" role="status"></p>
+          </details>
+        </dialog>
       </div>
     </div>
 
@@ -244,11 +290,11 @@
           <div class="setup-card">
             <div class="setup-card-title"><i data-lucide="zap" style="width:13px;height:13px"></i> How it works</div>
             <p style="font-size:13px;color:var(--text2);line-height:1.75;margin-bottom:10px;">
-              Each project gets its own MCP SSE endpoint. Add each project as a separate server entry in your AI client config.
+              Run <code>.venv/bin/python start.py</code> once and keep that terminal open. The workspace and MCP use the same service. Copy your project’s config below into OpenCode.
               Documents are exposed as <strong style="color:var(--text)">tools</strong>, <strong style="color:var(--text)">resources</strong>,
-              and <strong style="color:var(--text)">prompts</strong> — so your AI sees them automatically.
+              and <strong style="color:var(--text)">prompts</strong> — available for your AI client to read.
             </p>
-            <div class="code-block"><pre>http://localhost:8001/<span style="color:var(--accent)">&lt;project_slug&gt;</span>/sse</pre></div>
+            <div class="code-block"><pre>http://127.0.0.1:8000/mcp/<span style="color:var(--accent)">&lt;project_slug&gt;</span>/mcp</pre></div>
           </div>
 
           <!-- Live projects -->
@@ -307,15 +353,36 @@
       </div>
       <div class="content">
         <div class="setup-wrap provider-settings">
-          <p>Connect your own OpenAI or Anthropic API account. These preferences prepare model access; they do not run agents or select models by task.</p>
+          <p>Connect providers once and add more whenever you need them. Use OpenAI, Anthropic, Ollama, or an OpenAI-compatible API such as LM Studio, vLLM, or a compatible hosted service. No key is required for a keyless local server.</p>
+          <div class="provider-actions">
+            <button class="btn btn-primary btn-sm" id="provider-add-ollama">Add Ollama</button>
+            <button class="btn btn-secondary btn-sm" id="provider-add-compatible">Add compatible endpoint</button>
+          </div>
           <p id="providers-status" role="status" aria-live="polite">Loading provider status…</p>
           <div id="providers-list"></div>
+          <form class="setup-card provider-routing" id="provider-routing-form">
+            <h2 class="setup-card-title">Usage preferences for automatic routing</h2>
+            <div class="form-field">
+              <label for="provider-routing-mode">Routing mode</label>
+              <select id="provider-routing-mode" class="form-input">
+                <option value="local_only">Local only — no remote providers</option>
+                <option value="local_first">Prefer local — allowed remote providers may also be used</option>
+                <option value="balanced">Balanced — favor configured defaults and lighter workers</option>
+                <option value="quality">Prefer stronger models — potentially higher cost</option>
+              </select>
+            </div>
+            <fieldset id="provider-routing-options"><legend>Providers the automatic workflow may use</legend></fieldset>
+            <p>No provider is opted in automatically. These permissions apply to automatic routing; an explicit single-provider task uses the provider you select. A remote provider can receive the goal and generated context and may charge for usage. “Free” hosting is governed by its provider, not this app.</p>
+            <button class="btn btn-primary btn-sm" type="submit" id="provider-routing-save">Save usage preferences</button>
+            <p id="provider-routing-status" role="status" aria-live="polite"></p>
+          </form>
           <div class="setup-card">
             <h2 class="setup-card-title">Credential storage</h2>
             <p>Existing <code>OPENAI_API_KEY</code> and <code>ANTHROPIC_API_KEY</code> environment variables take precedence and skip first-time setup.</p>
             <p>Save new keys to the OS credential store, or keep them in API-server memory until restart. Server-memory credentials are shared by local clients and are lost on reload.</p>
             <p>Only non-secret preferences are saved in JSON. API keys are never saved in browser storage or returned by the settings API.</p>
             <p>API access may require separate billing. ChatGPT and Claude subscriptions do not automatically include API access. Provider sign-in is not supported here yet.</p>
+            <p>Local HTTP is supported only on loopback addresses. Other servers need HTTPS. Start your local server and install/load its models first; this app does not download models or start inference servers. Local only excludes recognized Ollama cloud models and checks native model metadata before generation. A custom local proxy can still forward remotely—only configure servers you trust. Model listing is not proof that a model can follow structured planning instructions.</p>
           </div>
         </div>
       </div>
@@ -494,7 +561,7 @@
       <button type="button" class="modal-close" id="provider-close" aria-label="Close provider setup">×</button>
     </div>
     <div class="modal-body">
-      <p id="provider-dialog-intro">Connect a provider now, or set up later. Your existing project features remain available.</p>
+      <p id="provider-dialog-intro">Choose a provider, paste your API key, then save. We check the connection for you. Models are chosen when you start a task.</p>
       <div class="form-field">
         <label for="provider-select">Provider</label>
         <select class="form-input" id="provider-select">
@@ -502,11 +569,34 @@
           <option value="anthropic">Anthropic</option>
         </select>
       </div>
+      <div id="provider-profile-fields" hidden>
+        <div class="form-field">
+          <label for="provider-profile-name">Connection name</label>
+          <input class="form-input" id="provider-profile-name" maxlength="80" placeholder="My Ollama">
+        </div>
+        <div class="form-field">
+          <label for="provider-base-url">API base URL</label>
+          <input class="form-input" type="url" id="provider-base-url" maxlength="2048" placeholder="http://localhost:11434">
+          <p>Ollama: http://localhost:11434 (no /api suffix). LM Studio: http://localhost:1234/v1. Other compatible services: use their documented API base URL. Existing endpoint URLs cannot be changed; add a new connection instead.</p>
+        </div>
+        <label class="provider-default"><input type="checkbox" id="provider-requires-key"> This endpoint requires an API key</label>
+        <label class="provider-default" id="provider-clear-key-field" hidden><input type="checkbox" id="provider-clear-key"> Remove the saved key and use this endpoint without authentication</label>
+        <div class="task-limits">
+          <div class="form-field"><label for="provider-context-tokens">Context token budget</label><input class="form-input" type="number" min="2" max="2000000" value="8192" id="provider-context-tokens"></div>
+          <div class="form-field"><label for="provider-output-tokens">Output token budget</label><input class="form-input" type="number" min="1" max="24000" value="2048" id="provider-output-tokens"></div>
+        </div>
+        <p>Use budgets supported by your model and hardware. Input token estimates use a generic tokenizer; smaller models may need simpler tasks or fewer subtasks. Output budget must be smaller than context.</p>
+        <div class="form-field">
+          <label for="provider-allowed-models">Approved model IDs (optional, one per line)</label>
+          <textarea class="form-input" id="provider-allowed-models" rows="3" placeholder="Leave empty to allow all compatible discovered models"></textarea>
+          <p>Limit this connection to specific model IDs, such as a hosted service's free-tier models. Up to 50 IDs. Models outside this list cannot be selected or invoked through this profile. Check the provider's current pricing; a free label is not a billing guarantee.</p>
+        </div>
+      </div>
       <p id="provider-source"></p>
       <div class="form-field" id="provider-key-field">
         <label for="provider-key">API key</label>
         <input class="form-input" id="provider-key" type="password" autocomplete="new-password" spellcheck="false" autocapitalize="none" maxlength="4096" aria-describedby="provider-key-help">
-        <p id="provider-key-help">Enter a new key to connect or replace credentials. Leave blank to keep an existing key.</p>
+        <p id="provider-key-help">Enter a new key to connect or replace credentials. Leave blank to keep an existing key. Keyless local profiles do not require one.</p>
         <a id="provider-key-link" href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer">Manage API keys at the provider</a>
       </div>
       <div class="form-field" id="provider-storage-field">
@@ -520,10 +610,10 @@
       <button type="button" class="btn btn-secondary" id="provider-test">Test connection and load models</button>
       <p id="provider-test-status" role="status" aria-live="polite"></p>
       <div class="form-field">
-        <label for="provider-model">Default model identifier</label>
-        <input class="form-input" id="provider-model" list="provider-models" maxlength="200" required autocomplete="off" placeholder="Test connection to load available models">
+        <label for="provider-model">Preferred model (optional)</label>
+        <input class="form-input" id="provider-model" list="provider-models" maxlength="200" autocomplete="off" placeholder="Automatic — no model name needed">
         <datalist id="provider-models"></datalist>
-        <p>Choose from the returned models or enter an exact identifier. Listing models verifies authentication, not inference access or task suitability.</p>
+        <p>Leave blank for automatic selection. The connection check lists models; your first task checks whether they can generate an answer. Provider billing or access limits may still apply.</p>
       </div>
       <label class="provider-default"><input type="checkbox" id="provider-default" checked> Set as default provider (otherwise keep the current default)</label>
       <p id="provider-form-status" role="status" aria-live="polite"></p>

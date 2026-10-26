@@ -1,93 +1,76 @@
 #!/usr/bin/env python3
-"""
-start.py — starts both the API server (port 8000) and MCP server (port 8001).
-Usage: /Users/vumathe/miniforge3/envs/venv_mcp/bin/python start.py
-"""
-import subprocess
-import sys
-import signal
+"""Run the workspace, API and project MCP endpoints together on port 8000."""
 import socket
+import sys
 from pathlib import Path
 
-SRC = Path(__file__).parent / "src"
+import uvicorn
 
-# Always use the python that's running this script — ensures correct venv.
-PYTHON = sys.executable
-
-
-def port_in_use(port: int) -> bool:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        return s.connect_ex(("127.0.0.1", port)) == 0
+HOST = "127.0.0.1"
+PORT = 8000
+SHUTDOWN_GRACE_SECONDS = 5
 
 
-def kill_port(port: int):
-    """Kill whatever is sitting on a port before we try to bind it."""
-    import os
-    try:
-        result = subprocess.run(
-            ["lsof", "-ti", f":{port}"], capture_output=True, text=True
-        )
-        pids = result.stdout.strip().split()
-        for pid in pids:
-            os.kill(int(pid), signal.SIGKILL)
-        if pids:
-            print(f"[self_mcp] Cleared stale process(es) on port {port}: {', '.join(pids)}")
-    except Exception:
-        pass
+class WorkspaceServer(uvicorn.Server):
+    async def startup(self, sockets=None):
+        await super().startup(sockets=sockets)
+        # A banner before lifespan startup used to imply success when the lock failed.
+        if self.started:
+            print(f"[self_mcp] Ready: workspace + API + MCP → http://{HOST}:{PORT}", flush=True)
+            print("[self_mcp] Keep this terminal open. Ctrl+C stops the service and releases the port.", flush=True)
+
+    def handle_exit(self, sig, frame):
+        if not self.should_exit:
+            print("\n[self_mcp] Stopping; closing MCP connections and saving task state…", flush=True)
+        super().handle_exit(sig, frame)
+
+    async def shutdown(self, sockets=None):
+        # Bound uvicorn's connection drain: a long-lived MCP stream must not prevent
+        # the ASGI lifespan from cancelling jobs and releasing the runner lease.
+        await super().shutdown(sockets=sockets)
+        if not self.force_exit:
+            print("[self_mcp] Stopped. Port 8000 and the task-runner lock are released.", flush=True)
 
 
-procs = []
+def main():
+    if sys.version_info < (3, 12):
+        raise SystemExit("Python 3.12+ is required. Use .venv/bin/python start.py.")
+    sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
+    from providers import ProviderError
+    from task_store import TaskStore
 
-
-def stop(sig, frame):
-    print("\n[self_mcp] Shutting down...")
-    for p in procs:
+    # Reserve the port before application startup, then keep ownership until exit.
+    # The context manager closes it even if startup fails or Ctrl+C interrupts it.
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
-            p.terminate()
-        except Exception:
+            listener.bind((HOST, PORT))
+        except OSError as error:
+            print(f"[self_mcp] Cannot use port {PORT}: {error.strerror or error}.", flush=True)
+            print("[self_mcp] Stop the existing service with Ctrl+C, then try again. No process was stopped.", flush=True)
+            return 1
+
+        # Distinguish a closed port from an old process still draining connections.
+        # This is only a preflight; the runner takes and owns its lease at startup.
+        store = TaskStore()
+        try:
+            store.acquire_owner()
+        except ProviderError as error:
+            print(f"[self_mcp] Cannot start: {error.message}", flush=True)
+            return 1
+        finally:
+            store.release_owner()
+
+        config = uvicorn.Config("api:app", host=HOST, port=PORT, log_level="warning",
+                                lifespan="on", timeout_graceful_shutdown=SHUTDOWN_GRACE_SECONDS)
+        server = WorkspaceServer(config)
+        print("[self_mcp] Starting workspace + MCP…", flush=True)
+        try:
+            server.run(sockets=[listener])
+        except KeyboardInterrupt:
             pass
-    sys.exit(0)
+        return 0 if server.started else 1
 
 
-signal.signal(signal.SIGINT, stop)
-signal.signal(signal.SIGTERM, stop)
-
-# Clear stale processes on both ports before starting.
-for port in (8000, 8001):
-    if port_in_use(port):
-        print(f"[self_mcp] Port {port} busy — clearing...")
-        kill_port(port)
-
-import time; time.sleep(0.5)  # brief wait for OS to release ports
-
-print("[self_mcp] Starting API server  → http://localhost:8000")
-print("[self_mcp] Starting MCP server  → http://localhost:8001/<slug>/sse")
-print("[self_mcp] GUI                  → http://localhost:8000")
-print("[self_mcp] Press Ctrl+C to stop\n")
-
-api = subprocess.Popen(
-    [PYTHON, "-m", "uvicorn", "api:app",
-     "--host", "127.0.0.1", "--port", "8000", "--reload"],
-    cwd=SRC,
-)
-mcp = subprocess.Popen(
-    [PYTHON, "mcp_server.py"],
-    cwd=SRC,
-)
-
-procs = [api, mcp]
-
-# Wait for either process to exit; if one dies, kill the other.
-try:
-    while True:
-        if api.poll() is not None:
-            print("[self_mcp] API server exited unexpectedly.")
-            mcp.terminate()
-            break
-        if mcp.poll() is not None:
-            print("[self_mcp] MCP server exited unexpectedly.")
-            api.terminate()
-            break
-        time.sleep(1)
-except KeyboardInterrupt:
-    stop(None, None)
+if __name__ == "__main__":
+    raise SystemExit(main())
